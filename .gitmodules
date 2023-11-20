@@ -1,0 +1,18 @@
+[submodule "lib/forge-std"]
+	path = lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
+[submodule "lib/openzeppelin-contracts"]
+	path = lib/openzeppelin-contracts
+	url = git@github.com:OpenZeppelin/openzeppelin-contracts
+[submodule "lib/forge-gas-snapshot"]
+	path = lib/forge-gas-snapshot
+	url = git@github.com:marktoda/forge-gas-snapshot
+[submodule "lib/v4-core"]
+	path = lib/v4-core
+	url = git@github.com:Uniswap/v4-core
+[submodule "lib/solmate"]
+	path = lib/solmate
+	url = git@github.com:transmissions11/solmate
+[submodule "lib/periphery-next"]
+	path = lib/periphery-next
+	url = git@github.com:Uniswap/periphery-next
