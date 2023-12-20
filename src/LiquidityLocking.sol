@@ -453,7 +453,7 @@ contract LiquidityLocking is BaseHook, ILockCallback {
         );
     }
 
-    function _rebalance(PoolKey memory key) public {
+    function _rebalance(PoolKey memory key) internal {
         PoolId poolId = key.toId();
         BalanceDelta balanceDelta = poolManager.modifyPosition(
             key,
