@@ -2,6 +2,7 @@
 pragma solidity ^0.8.19;
 
 import {Utils} from "../utils/Utils.sol";
+import {BaseHookNoState} from "../utils/BaseHookNoState.sol";
 import {LiquidityManagerLib} from "./LiquidityManagerLib.sol";
 import {CallbackData, InitParams, PoolInfo, AddLiquidityParams, RemoveLiquidityParams, MIN_TICK, MAX_TICK, TICK_SPACING, FIXED_POINT_SCALING, INITIAL_LIQUIDITY} from "./LiquidityManagerStructs.sol";
 
@@ -52,7 +53,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
    - More unit tests need to be written.
 */
 
-contract LiquidityManager is BaseHook, ILockCallback, Ownable {
+contract LiquidityManager is Ownable, BaseHookNoState {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
@@ -75,12 +76,13 @@ contract LiquidityManager is BaseHook, ILockCallback, Ownable {
     // prevents multiple rebalances in the same transaction
     bool rebalanceInProgress;
 
+    IPoolManager public immutable poolManager;
+
     mapping(PoolId => PoolInfo) public poolInfos;
 
-    constructor(
-        IPoolManager poolManager,
-        address owner
-    ) BaseHook(poolManager) Ownable(owner) {}
+    constructor(IPoolManager _poolManager, address owner) Ownable(owner) {
+        poolManager = _poolManager;
+    }
 
     modifier ensure(uint256 deadline) {
         if (deadline < block.timestamp) revert ExpiredPastDeadline();
@@ -92,7 +94,7 @@ contract LiquidityManager is BaseHook, ILockCallback, Ownable {
         PoolKey calldata key,
         uint160 sqrtPriceX96,
         bytes calldata data
-    ) external override poolManagerOnly returns (bytes4) {
+    ) external override poolManagerOnly(poolManager) returns (bytes4) {
         InitParams memory initParams = abi.decode(data, (InitParams));
         PoolId poolId = key.toId();
 
@@ -124,7 +126,7 @@ contract LiquidityManager is BaseHook, ILockCallback, Ownable {
             token1Balance: 0
         });
 
-        return LiquidityManager.beforeInitialize.selector;
+        return IHooks.beforeInitialize.selector;
     }
 
     function addLiquidity(
@@ -563,12 +565,7 @@ contract LiquidityManager is BaseHook, ILockCallback, Ownable {
 
     function lockAcquired(
         bytes calldata rawData
-    )
-        external
-        override(ILockCallback, BaseHook)
-        poolManagerOnly
-        returns (bytes memory)
-    {
+    ) external override poolManagerOnly(poolManager) returns (bytes memory) {
         CallbackData memory callbackData = abi.decode(rawData, (CallbackData));
 
         BalanceDelta delta;
@@ -673,7 +670,7 @@ contract LiquidityManager is BaseHook, ILockCallback, Ownable {
         IPoolManager.SwapParams calldata,
         BalanceDelta,
         bytes calldata
-    ) external virtual override poolManagerOnly returns (bytes4) {
+    ) external virtual override poolManagerOnly(poolManager) returns (bytes4) {
         PoolId poolId = poolKey.toId();
         PoolInfo storage poolInfo = poolInfos[poolId];
 
@@ -681,6 +678,6 @@ contract LiquidityManager is BaseHook, ILockCallback, Ownable {
 
         rebalanceIfNecessary(poolKey, false);
 
-        return LiquidityManager.afterSwap.selector;
+        return IHooks.afterSwap.selector;
     }
 }

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.19;
 
 import {Utils} from "./utils/Utils.sol";
+import {BaseHookNoState} from "./utils/BaseHookNoState.sol";
 
 import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
 import {PoolManager} from "@uniswap/v4-core/contracts/PoolManager.sol";
@@ -50,7 +51,7 @@ uint256 constant MINIMUM_FEE_THRESHOLD = 100;
 // SWAP_MISMATCH_PCT_THRESHOLD is represented in fixed decimal point with precision of 4
 uint256 constant SWAP_MISMATCH_PCT_THRESHOLD = 99_0000;
 
-contract VolumeFee is BaseHook, Ownable, IDynamicFeeManager {
+contract VolumeFee is Ownable, IDynamicFeeManager, BaseHookNoState {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
@@ -80,19 +81,22 @@ contract VolumeFee is BaseHook, Ownable, IDynamicFeeManager {
         uint24 initialFee;
     }
 
+    IPoolManager public immutable poolManager;
+
     mapping(PoolId => PoolInfo) public poolInfos;
 
-    constructor(
-        IPoolManager _poolManager,
-        address _owner
-    ) BaseHook(_poolManager) Ownable(_owner) {}
+    bool internal skipBeforeAfterHooks;
+
+    constructor(IPoolManager _poolManager, address _owner) Ownable(_owner) {
+        poolManager = _poolManager;
+    }
 
     function beforeInitialize(
         address,
         PoolKey calldata key,
         uint160,
-        bytes calldata data
-    ) external override poolManagerOnly returns (bytes4) {
+        bytes memory data
+    ) public virtual override poolManagerOnly(poolManager) returns (bytes4) {
         InitParams memory initParams = abi.decode(data, (InitParams));
 
         PoolInfo storage poolInfo = poolInfos[key.toId()];
@@ -101,10 +105,16 @@ contract VolumeFee is BaseHook, Ownable, IDynamicFeeManager {
         poolInfo.lastFeeDecreaseTime = block.timestamp;
         poolInfo.currentFee = initParams.initialFee;
 
-        return VolumeFee.beforeInitialize.selector;
+        return IHooks.beforeInitialize.selector;
     }
 
-    function getHooksCalls() public pure override returns (Hooks.Calls memory) {
+    function getHooksCalls()
+        public
+        pure
+        virtual
+        override
+        returns (Hooks.Calls memory)
+    {
         return
             Hooks.Calls({
                 beforeInitialize: true,
@@ -123,7 +133,9 @@ contract VolumeFee is BaseHook, Ownable, IDynamicFeeManager {
         PoolKey calldata key,
         IPoolManager.SwapParams calldata swapParams,
         bytes calldata
-    ) external virtual override poolManagerOnly returns (bytes4) {
+    ) public virtual override poolManagerOnly(poolManager) returns (bytes4) {
+        if (skipBeforeAfterHooks) return IHooks.beforeSwap.selector;
+
         PoolId poolId = key.toId();
         PoolInfo storage poolInfo = poolInfos[poolId];
 
@@ -157,7 +169,6 @@ contract VolumeFee is BaseHook, Ownable, IDynamicFeeManager {
                     ((feeDecrease / feeDecreasePerTimeUnit) *
                         FEE_DECREASE_TIME_UNIT);
             }
-
             poolInfo.token1SoFar =
                 token1SoFar -
                 (feeIncrease * FEE_INCREASE_TOKEN1_UNIT) /
@@ -182,8 +193,7 @@ contract VolumeFee is BaseHook, Ownable, IDynamicFeeManager {
         } else {
             poolInfo.token1SoFar = token1SoFar;
         }
-
-        return VolumeFee.beforeSwap.selector;
+        return IHooks.beforeSwap.selector;
     }
 
     function afterSwap(
@@ -192,7 +202,10 @@ contract VolumeFee is BaseHook, Ownable, IDynamicFeeManager {
         IPoolManager.SwapParams calldata swapParams,
         BalanceDelta balanceDelta,
         bytes calldata
-    ) external virtual override poolManagerOnly returns (bytes4) {
+    ) public virtual override poolManagerOnly(poolManager) returns (bytes4) {
+        if (skipBeforeAfterHooks) return IHooks.afterSwap.selector;
+
+        // see the comments for SWAP_MISMATCH_PCT_THRESHOLD
         if (
             (uint256(
                 uint128(
@@ -208,7 +221,7 @@ contract VolumeFee is BaseHook, Ownable, IDynamicFeeManager {
         ) {
             revert SWAP_AMOUNT_MISMATCH_ERROR();
         }
-        return VolumeFee.afterSwap.selector;
+        return IHooks.afterSwap.selector;
     }
 
     function getFee(
