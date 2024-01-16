@@ -74,13 +74,15 @@ contract LiquidtyLockingTest is Deployers, Test {
             _poolKey,
             SQRT_RATIO_1_1,
             abi.encode(
-                LiquidityLocking.InitParams(
+                LiquidityLocking.InitParamsLiquidityLocking(
                     REWARD_GENERATION_RATE,
                     WITHDRAWAL_PENALTY_PCT
                 )
             )
         );
-        (, _rewardToken, , , ) = liquidityLocking.poolInfo(_poolId);
+        (, _rewardToken, , , ) = liquidityLocking.poolInfoLiquidityLocking(
+            _poolId
+        );
 
         _charlie = makeAddr("charlie");
         vm.startPrank(_charlie);
@@ -147,7 +149,7 @@ contract LiquidtyLockingTest is Deployers, Test {
             address(_manager)
         );
         (, , , contractState.totalLiquidityShares, ) = liquidityLocking
-            .poolInfo(_poolId);
+            .poolInfoLiquidityLocking(_poolId);
         contractState.lockingInfo = liquidityLocking.poolUserInfo(
             _poolId,
             user

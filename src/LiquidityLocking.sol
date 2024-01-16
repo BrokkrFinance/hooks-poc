@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.19;
 
+import {BaseHookNoState} from "./utils/BaseHookNoState.sol";
+
 import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
 import {PoolManager} from "@uniswap/v4-core/contracts/PoolManager.sol";
 import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
-import {BaseHook} from "@uniswap/periphery-next/contracts/BaseHook.sol";
 import {SafeCast} from "@uniswap/v4-core/contracts/libraries/SafeCast.sol";
 import {IHooks} from "@uniswap/v4-core/contracts/interfaces/IHooks.sol";
 import {CurrencyLibrary, Currency} from "@uniswap/v4-core/contracts/types/Currency.sol";
@@ -27,7 +28,7 @@ import {console} from "forge-std/Test.sol";
 
 uint256 constant FIXED_POINT_SCALING = 1_000_000;
 
-contract LiquidityLocking is BaseHook, ILockCallback {
+contract LiquidityLocking is BaseHookNoState {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
@@ -68,7 +69,7 @@ contract LiquidityLocking is BaseHook, ILockCallback {
         uint256 liquidityShare;
     }
 
-    struct PoolInfo {
+    struct PoolInfoLiquidityLocking {
         bool hasAccruedFees;
         UniswapV4ERC20 rewardToken;
         // reward token amount gained per liquidity provided per seconds, scaled by FIXED_POINT_SCALING
@@ -78,7 +79,7 @@ contract LiquidityLocking is BaseHook, ILockCallback {
         mapping(address => LockingInfo) lockingInfos;
     }
 
-    struct InitParams {
+    struct InitParamsLiquidityLocking {
         uint256 rewardGenerationRate;
         uint24 earlyWithdrawalPenaltyPct;
     }
@@ -103,9 +104,13 @@ contract LiquidityLocking is BaseHook, ILockCallback {
         uint256 deadline;
     }
 
-    mapping(PoolId => PoolInfo) public poolInfo;
+    IPoolManager public immutable poolManagerLiquidityLocking;
 
-    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {}
+    mapping(PoolId => PoolInfoLiquidityLocking) public poolInfoLiquidityLocking;
+
+    constructor(IPoolManager _poolManager) {
+        poolManagerLiquidityLocking = _poolManager;
+    }
 
     modifier ensure(uint256 deadline) {
         if (deadline < block.timestamp) revert ExpiredPastDeadline();
@@ -116,15 +121,21 @@ contract LiquidityLocking is BaseHook, ILockCallback {
         PoolId poolId,
         address user
     ) external view returns (LockingInfo memory) {
-        return poolInfo[poolId].lockingInfos[user];
+        return poolInfoLiquidityLocking[poolId].lockingInfos[user];
     }
 
     function beforeInitialize(
         address,
         PoolKey calldata key,
         uint160,
-        bytes calldata data
-    ) external override poolManagerOnly returns (bytes4) {
+        bytes memory data
+    )
+        public
+        virtual
+        override
+        poolManagerOnly(poolManagerLiquidityLocking)
+        returns (bytes4)
+    {
         if (key.tickSpacing != 60) revert TickSpacingNotDefault();
 
         PoolId poolId = key.toId();
@@ -140,9 +151,13 @@ contract LiquidityLocking is BaseHook, ILockCallback {
                 Strings.toString(uint256(key.fee))
             )
         );
-        InitParams memory initParams = abi.decode(data, (InitParams));
+        InitParamsLiquidityLocking memory initParams = abi.decode(
+            data,
+            (InitParamsLiquidityLocking)
+        );
 
-        PoolInfo storage poolInfoToInit = poolInfo[poolId];
+        PoolInfoLiquidityLocking
+            storage poolInfoToInit = poolInfoLiquidityLocking[poolId];
         poolInfoToInit.hasAccruedFees = false;
         poolInfoToInit.rewardToken = new UniswapV4ERC20(
             tokenSymbol,
@@ -152,10 +167,16 @@ contract LiquidityLocking is BaseHook, ILockCallback {
         poolInfoToInit.earlyWithdrawalPenaltyPct = initParams
             .earlyWithdrawalPenaltyPct;
 
-        return LiquidityLocking.beforeInitialize.selector;
+        return IHooks.beforeInitialize.selector;
     }
 
-    function getHooksCalls() public pure override returns (Hooks.Calls memory) {
+    function getHooksCalls()
+        public
+        pure
+        virtual
+        override
+        returns (Hooks.Calls memory)
+    {
         return
             Hooks.Calls({
                 beforeInitialize: true,
@@ -172,6 +193,9 @@ contract LiquidityLocking is BaseHook, ILockCallback {
     function addLiquidity(
         AddLiquidityParams calldata params
     ) external ensure(params.deadline) returns (uint128 liquidity) {
+        // The hook was based on the FullRange hook, and has the same issue as raised here
+        // https://github.com/Uniswap/v4-periphery/issues/68
+
         if (params.lockedUntil <= block.timestamp) {
             revert ExpiredPastlockedUntil();
         }
@@ -186,13 +210,19 @@ contract LiquidityLocking is BaseHook, ILockCallback {
 
         PoolId poolId = key.toId();
 
-        (uint160 sqrtPriceX96, , , ) = poolManager.getSlot0(poolId);
+        (uint160 sqrtPriceX96, , , ) = poolManagerLiquidityLocking.getSlot0(
+            poolId
+        );
 
         if (sqrtPriceX96 == 0) revert PoolNotInitialized();
 
-        PoolInfo storage pool = poolInfo[poolId];
+        PoolInfoLiquidityLocking storage pool = poolInfoLiquidityLocking[
+            poolId
+        ];
 
-        uint128 poolLiquidity = poolManager.getLiquidity(poolId);
+        uint128 poolLiquidity = poolManagerLiquidityLocking.getLiquidity(
+            poolId
+        );
 
         liquidity = LiquidityAmounts.getLiquidityForAmounts(
             sqrtPriceX96,
@@ -271,9 +301,13 @@ contract LiquidityLocking is BaseHook, ILockCallback {
 
         PoolId poolId = key.toId();
 
-        PoolInfo storage pool = poolInfo[poolId];
+        PoolInfoLiquidityLocking storage pool = poolInfoLiquidityLocking[
+            poolId
+        ];
 
-        (uint160 sqrtPriceX96, , , ) = poolManager.getSlot0(poolId);
+        (uint160 sqrtPriceX96, , , ) = poolManagerLiquidityLocking.getSlot0(
+            poolId
+        );
 
         if (sqrtPriceX96 == 0) revert PoolNotInitialized();
 
@@ -322,7 +356,7 @@ contract LiquidityLocking is BaseHook, ILockCallback {
         bool applyEarlyWithdrawalPenalty
     ) internal returns (BalanceDelta delta) {
         delta = abi.decode(
-            poolManager.lock(
+            poolManagerLiquidityLocking.lock(
                 abi.encode(
                     CallbackData(
                         msg.sender,
@@ -339,9 +373,10 @@ contract LiquidityLocking is BaseHook, ILockCallback {
     function lockAcquired(
         bytes calldata rawData
     )
-        external
-        override(ILockCallback, BaseHook)
-        poolManagerOnly
+        public
+        virtual
+        override
+        poolManagerOnly(poolManagerLiquidityLocking)
         returns (bytes memory)
     {
         CallbackData memory data = abi.decode(rawData, (CallbackData));
@@ -353,7 +388,10 @@ contract LiquidityLocking is BaseHook, ILockCallback {
                 // For early withdrawals a flat percentage of penalty will be applied on the withdrawn assets (not on the full amount of assets
                 // that the user locked). Assets taken as penalties will be donated to the pool.
                 int128 earlyWithdrawalPenaltyPct = int128(
-                    uint128(poolInfo[data.key.toId()].earlyWithdrawalPenaltyPct)
+                    uint128(
+                        poolInfoLiquidityLocking[data.key.toId()]
+                            .earlyWithdrawalPenaltyPct
+                    )
                 );
                 int128 token0AmountToDonate = (-delta.amount0() *
                     earlyWithdrawalPenaltyPct) /
@@ -365,7 +403,7 @@ contract LiquidityLocking is BaseHook, ILockCallback {
                 delta =
                     delta +
                     toBalanceDelta(token0AmountToDonate, token1AmountToDonate);
-                poolManager.donate(
+                poolManagerLiquidityLocking.donate(
                     data.key,
                     uint256(uint128(token0AmountToDonate)),
                     uint256(uint128(token1AmountToDonate)),
@@ -374,7 +412,7 @@ contract LiquidityLocking is BaseHook, ILockCallback {
             }
             _takeDeltas(data.sender, data.key, delta);
         } else {
-            delta = poolManager.modifyPosition(
+            delta = poolManagerLiquidityLocking.modifyPosition(
                 data.key,
                 data.params,
                 ZERO_BYTES
@@ -389,7 +427,9 @@ contract LiquidityLocking is BaseHook, ILockCallback {
         IPoolManager.ModifyPositionParams memory params
     ) internal returns (BalanceDelta delta) {
         PoolId poolId = key.toId();
-        PoolInfo storage pool = poolInfo[poolId];
+        PoolInfoLiquidityLocking storage pool = poolInfoLiquidityLocking[
+            poolId
+        ];
 
         if (pool.hasAccruedFees) {
             _rebalance(key);
@@ -397,12 +437,16 @@ contract LiquidityLocking is BaseHook, ILockCallback {
 
         uint256 liquidityToRemove = FullMath.mulDiv(
             uint256(-params.liquidityDelta),
-            poolManager.getLiquidity(poolId),
+            poolManagerLiquidityLocking.getLiquidity(poolId),
             pool.totalLiquidityShares
         );
 
         params.liquidityDelta = -(liquidityToRemove.toInt256());
-        delta = poolManager.modifyPosition(key, params, ZERO_BYTES);
+        delta = poolManagerLiquidityLocking.modifyPosition(
+            key,
+            params,
+            ZERO_BYTES
+        );
         pool.hasAccruedFees = false;
     }
 
@@ -421,18 +465,18 @@ contract LiquidityLocking is BaseHook, ILockCallback {
         uint128 amount
     ) internal {
         if (currency.isNative()) {
-            poolManager.settle{value: amount}(currency);
+            poolManagerLiquidityLocking.settle{value: amount}(currency);
         } else {
             if (sender == address(this)) {
-                currency.transfer(address(poolManager), amount);
+                currency.transfer(address(poolManagerLiquidityLocking), amount);
             } else {
                 IERC20Minimal(Currency.unwrap(currency)).transferFrom(
                     sender,
-                    address(poolManager),
+                    address(poolManagerLiquidityLocking),
                     amount
                 );
             }
-            poolManager.settle(currency);
+            poolManagerLiquidityLocking.settle(currency);
         }
     }
 
@@ -441,12 +485,12 @@ contract LiquidityLocking is BaseHook, ILockCallback {
         PoolKey memory key,
         BalanceDelta delta
     ) internal {
-        poolManager.take(
+        poolManagerLiquidityLocking.take(
             key.currency0,
             sender,
             uint256(uint128(-delta.amount0()))
         );
-        poolManager.take(
+        poolManagerLiquidityLocking.take(
             key.currency1,
             sender,
             uint256(uint128(-delta.amount1()))
@@ -455,12 +499,14 @@ contract LiquidityLocking is BaseHook, ILockCallback {
 
     function _rebalance(PoolKey memory key) internal {
         PoolId poolId = key.toId();
-        BalanceDelta balanceDelta = poolManager.modifyPosition(
+        BalanceDelta balanceDelta = poolManagerLiquidityLocking.modifyPosition(
             key,
             IPoolManager.ModifyPositionParams({
                 tickLower: MIN_TICK,
                 tickUpper: MAX_TICK,
-                liquidityDelta: -(poolManager.getLiquidity(poolId).toInt256())
+                liquidityDelta: -(
+                    poolManagerLiquidityLocking.getLiquidity(poolId).toInt256()
+                )
             }),
             ZERO_BYTES
         );
@@ -473,9 +519,11 @@ contract LiquidityLocking is BaseHook, ILockCallback {
             )
         ) * FixedPointMathLib.sqrt(FixedPoint96.Q96)).toUint160();
 
-        (uint160 sqrtPriceX96, , , ) = poolManager.getSlot0(poolId);
+        (uint160 sqrtPriceX96, , , ) = poolManagerLiquidityLocking.getSlot0(
+            poolId
+        );
 
-        poolManager.swap(
+        poolManagerLiquidityLocking.swap(
             key,
             IPoolManager.SwapParams({
                 zeroForOne: newSqrtPriceX96 < sqrtPriceX96,
@@ -493,15 +541,16 @@ contract LiquidityLocking is BaseHook, ILockCallback {
             uint256(uint128(-balanceDelta.amount1()))
         );
 
-        BalanceDelta balanceDeltaAfter = poolManager.modifyPosition(
-            key,
-            IPoolManager.ModifyPositionParams({
-                tickLower: MIN_TICK,
-                tickUpper: MAX_TICK,
-                liquidityDelta: liquidity.toInt256()
-            }),
-            ZERO_BYTES
-        );
+        BalanceDelta balanceDeltaAfter = poolManagerLiquidityLocking
+            .modifyPosition(
+                key,
+                IPoolManager.ModifyPositionParams({
+                    tickLower: MIN_TICK,
+                    tickUpper: MAX_TICK,
+                    liquidityDelta: liquidity.toInt256()
+                }),
+                ZERO_BYTES
+            );
 
         // Donate any "dust" from the sqrtRatio change as fees
         uint128 donateAmount0 = uint128(
@@ -511,7 +560,12 @@ contract LiquidityLocking is BaseHook, ILockCallback {
             -balanceDelta.amount1() - balanceDeltaAfter.amount1()
         );
 
-        poolManager.donate(key, donateAmount0, donateAmount1, ZERO_BYTES);
+        poolManagerLiquidityLocking.donate(
+            key,
+            donateAmount0,
+            donateAmount1,
+            ZERO_BYTES
+        );
     }
 
     function beforeModifyPosition(
@@ -519,10 +573,16 @@ contract LiquidityLocking is BaseHook, ILockCallback {
         PoolKey calldata,
         IPoolManager.ModifyPositionParams calldata,
         bytes calldata
-    ) external view override poolManagerOnly returns (bytes4) {
+    )
+        public
+        virtual
+        override
+        poolManagerOnly(poolManagerLiquidityLocking)
+        returns (bytes4)
+    {
         if (sender != address(this)) revert SenderMustBeHook();
 
-        return LiquidityLocking.beforeModifyPosition.selector;
+        return IHooks.beforeModifyPosition.selector;
     }
 
     function beforeSwap(
@@ -530,11 +590,19 @@ contract LiquidityLocking is BaseHook, ILockCallback {
         PoolKey calldata key,
         IPoolManager.SwapParams calldata,
         bytes calldata
-    ) external override poolManagerOnly returns (bytes4) {
+    )
+        public
+        virtual
+        override
+        poolManagerOnly(poolManagerLiquidityLocking)
+        returns (bytes4)
+    {
         PoolId poolId = key.toId();
 
-        if (!poolInfo[poolId].hasAccruedFees) {
-            PoolInfo storage pool = poolInfo[poolId];
+        if (!poolInfoLiquidityLocking[poolId].hasAccruedFees) {
+            PoolInfoLiquidityLocking storage pool = poolInfoLiquidityLocking[
+                poolId
+            ];
             pool.hasAccruedFees = true;
         }
 
