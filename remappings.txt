@@ -1,5 +1,5 @@
 @uniswap/v4-core/=lib/v4-core/
-@openzeppelin/=lib/v4-core/lib/openzeppelin-contracts/
+@openzeppelin/=lib/openzeppelin-contracts/
 forge-gas-snapshot/=lib/v4-core/lib/forge-gas-snapshot/src/
 forge-std/=lib/v4-core/lib/forge-std/src/
 hardhat/=lib/v4-core/node_modules/hardhat/
