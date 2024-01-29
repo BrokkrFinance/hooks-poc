@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.0;
 
-import {CurrencyLibrary, Currency} from "@uniswap/v4-core/contracts/types/Currency.sol";
-import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
-import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
-import {UniswapV4ERC20} from "@uniswap/periphery-next/contracts/libraries/UniswapV4ERC20.sol";
+import {UniswapV4ERC20} from "../periphery/UniswapV4ERC20.sol";
+
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 uint256 constant FIXED_POINT_SCALING = 100_0000;
 uint256 constant INITIAL_LIQUIDITY = 100_000;
@@ -16,7 +17,7 @@ int24 constant TICK_SPACING = 60;
 struct CallbackData {
     address sender;
     PoolKey poolKey;
-    IPoolManager.ModifyPositionParams[] modifyPositionParams;
+    IPoolManager.ModifyLiquidityParams[] modifyLiquidityParams;
 }
 
 struct InitParams {

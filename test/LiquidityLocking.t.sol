@@ -2,20 +2,16 @@
 pragma solidity ^0.8.13;
 
 import {LiquidityLocking, FIXED_POINT_SCALING} from "../src/LiquidityLocking.sol";
+import {UniswapV4ERC20} from "../src/periphery/UniswapV4ERC20.sol";
 
-import {MockERC20} from "@uniswap/v4-core/test/foundry-tests/utils/MockERC20.sol";
-import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
-import {PoolManager} from "@uniswap/v4-core/contracts/PoolManager.sol";
-import {Deployers} from "@uniswap/v4-core/test/foundry-tests/utils/Deployers.sol";
-import {Currency, CurrencyLibrary} from "@uniswap/v4-core/contracts/types/Currency.sol";
-import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
-import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/contracts/types/PoolId.sol";
-import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
-import {PoolSwapTest} from "@uniswap/v4-core/contracts/test/PoolSwapTest.sol";
-import {UniswapV4ERC20} from "@uniswap/periphery-next/contracts/libraries/UniswapV4ERC20.sol";
+import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
-import {BaseHook} from "@uniswap/periphery-next/contracts/BaseHook.sol";
+import {MockERC20} from "solmate/test/utils/mocks/MockERC20.sol";
 
 import {Test, console, console2} from "forge-std/Test.sol";
 
@@ -28,7 +24,7 @@ contract LiquidtyLockingTest is Deployers, Test {
             address(
                 uint160(
                     Hooks.BEFORE_INITIALIZE_FLAG |
-                        Hooks.BEFORE_MODIFY_POSITION_FLAG |
+                        Hooks.BEFORE_ADD_LIQUIDITY_FLAG |
                         Hooks.BEFORE_SWAP_FLAG
                 )
             )
@@ -36,14 +32,11 @@ contract LiquidtyLockingTest is Deployers, Test {
 
     using PoolIdLibrary for PoolKey;
 
-    MockERC20 _token0;
-    MockERC20 _token1;
-    PoolManager _manager;
-    PoolKey _poolKey;
-    PoolId _poolId;
-    UniswapV4ERC20 _rewardToken;
-
-    address _charlie;
+    MockERC20 token0;
+    MockERC20 token1;
+    PoolKey poolKey;
+    PoolId poolId;
+    UniswapV4ERC20 rewardToken;
 
     int24 constant TICK_SPACING = 60;
     uint256 constant MAX_DEADLINE = 12329839823;
@@ -54,24 +47,24 @@ contract LiquidtyLockingTest is Deployers, Test {
     function setUp() public {
         vm.warp(INITIAL_BLOCK_TIMESTAMP);
 
-        _token0 = new MockERC20("TestA", "A", 18, 2 ** 128);
-        _token1 = new MockERC20("TestB", "B", 18, 2 ** 128);
-        _manager = new PoolManager(500000);
-
+        deployFreshManagerAndRouters();
         deployCodeTo(
             "LiquidityLocking.sol",
-            abi.encode(_manager),
+            abi.encode(manager),
             address(liquidityLocking)
         );
+        (currency0, currency1) = deployMintAndApprove2Currencies();
 
-        _poolKey = createPoolKey(_token0, _token1);
-        _poolId = _poolKey.toId();
+        token0 = MockERC20(Currency.unwrap(currency0));
+        token1 = MockERC20(Currency.unwrap(currency1));
+        token0.approve(address(liquidityLocking), type(uint256).max);
+        token1.approve(address(liquidityLocking), type(uint256).max);
 
-        _token0.approve(address(liquidityLocking), type(uint256).max);
-        _token1.approve(address(liquidityLocking), type(uint256).max);
-
-        _manager.initialize(
-            _poolKey,
+        (poolKey, poolId) = initPool(
+            currency0,
+            currency1,
+            IHooks(liquidityLocking),
+            3000,
             SQRT_RATIO_1_1,
             abi.encode(
                 LiquidityLocking.InitParamsLiquidityLocking(
@@ -80,20 +73,22 @@ contract LiquidtyLockingTest is Deployers, Test {
                 )
             )
         );
-        (, _rewardToken, , , ) = liquidityLocking.poolInfoLiquidityLocking(
-            _poolId
+
+        (, rewardToken, , , ) = liquidityLocking.poolInfoLiquidityLocking(
+            poolId
         );
 
-        _charlie = makeAddr("charlie");
-        vm.startPrank(_charlie);
-        _token0.mint(_charlie, 10000 ether);
-        _token1.mint(_charlie, 10000 ether);
-        _token0.approve(address(liquidityLocking), type(uint256).max);
-        _token1.approve(address(liquidityLocking), type(uint256).max);
+        address charlie = makeAddr("charlie");
+        vm.startPrank(charlie);
+        token0.mint(charlie, 10000 ether);
+        token1.mint(charlie, 10000 ether);
+        token0.approve(address(liquidityLocking), type(uint256).max);
+        token1.approve(address(liquidityLocking), type(uint256).max);
+
         liquidityLocking.addLiquidity(
             LiquidityLocking.AddLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 100 ether,
                 100 ether,
@@ -104,22 +99,6 @@ contract LiquidtyLockingTest is Deployers, Test {
             )
         );
         vm.stopPrank();
-    }
-
-    function createPoolKey(
-        MockERC20 tokenA,
-        MockERC20 tokenB
-    ) internal view returns (PoolKey memory) {
-        if (address(tokenA) > address(tokenB))
-            (tokenA, tokenB) = (tokenB, tokenA);
-        return
-            PoolKey(
-                Currency.wrap(address(tokenA)),
-                Currency.wrap(address(tokenB)),
-                3000,
-                TICK_SPACING,
-                liquidityLocking
-            );
     }
 
     struct ContractState {
@@ -136,26 +115,15 @@ contract LiquidtyLockingTest is Deployers, Test {
     function getContractState(
         address user
     ) internal view returns (ContractState memory contractState) {
-        contractState.hookBalance0 = _poolKey.currency0.balanceOf(
-            address(this)
-        );
-        contractState.hookBalance1 = _poolKey.currency1.balanceOf(
-            address(this)
-        );
-        contractState.managerBalance0 = _poolKey.currency0.balanceOf(
-            address(_manager)
-        );
-        contractState.managerBalance1 = _poolKey.currency1.balanceOf(
-            address(_manager)
-        );
+        contractState.hookBalance0 = currency0.balanceOf(address(this));
+        contractState.hookBalance1 = currency1.balanceOf(address(this));
+        contractState.managerBalance0 = currency0.balanceOf(address(manager));
+        contractState.managerBalance1 = currency1.balanceOf(address(manager));
         (, , , contractState.totalLiquidityShares, ) = liquidityLocking
-            .poolInfoLiquidityLocking(_poolId);
-        contractState.lockingInfo = liquidityLocking.poolUserInfo(
-            _poolId,
-            user
-        );
-        contractState.totalRewardToken = _rewardToken.totalSupply();
-        contractState.userRewardToken = _rewardToken.balanceOf(user);
+            .poolInfoLiquidityLocking(poolId);
+        contractState.lockingInfo = liquidityLocking.poolUserInfo(poolId, user);
+        contractState.totalRewardToken = rewardToken.totalSupply();
+        contractState.userRewardToken = rewardToken.balanceOf(user);
     }
 
     function testLiquidityLocking_withdrawEarlyWithPenalties() public {
@@ -172,8 +140,8 @@ contract LiquidtyLockingTest is Deployers, Test {
         // adding liquidity
         liquidityLocking.addLiquidity(
             LiquidityLocking.AddLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 100 ether,
                 100 ether,
@@ -196,8 +164,8 @@ contract LiquidtyLockingTest is Deployers, Test {
             .liquidityShare / 3;
         liquidityLocking.removeLiquidity(
             LiquidityLocking.RemoveLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 liquiditySharesToRemove,
                 MAX_DEADLINE
@@ -289,8 +257,8 @@ contract LiquidtyLockingTest is Deployers, Test {
             liquiditySharesToRemove;
         liquidityLocking.removeLiquidity(
             LiquidityLocking.RemoveLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 liquiditySharesToRemove,
                 MAX_DEADLINE
@@ -392,8 +360,8 @@ contract LiquidtyLockingTest is Deployers, Test {
         // adding liquidity
         liquidityLocking.addLiquidity(
             LiquidityLocking.AddLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 100 ether,
                 100 ether,
@@ -446,8 +414,8 @@ contract LiquidtyLockingTest is Deployers, Test {
             .liquidityShare / 3;
         liquidityLocking.removeLiquidity(
             LiquidityLocking.RemoveLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 liquiditySharesToRemove,
                 MAX_DEADLINE
@@ -504,8 +472,8 @@ contract LiquidtyLockingTest is Deployers, Test {
             liquiditySharesToRemove;
         liquidityLocking.removeLiquidity(
             LiquidityLocking.RemoveLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 liquiditySharesToRemove,
                 MAX_DEADLINE
@@ -599,8 +567,8 @@ contract LiquidtyLockingTest is Deployers, Test {
         // adding liquidity
         liquidityLocking.addLiquidity(
             LiquidityLocking.AddLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 100 ether,
                 100 ether,
@@ -622,8 +590,8 @@ contract LiquidtyLockingTest is Deployers, Test {
 
         liquidityLocking.addLiquidity(
             LiquidityLocking.AddLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 100 ether,
                 100 ether,
@@ -637,8 +605,8 @@ contract LiquidtyLockingTest is Deployers, Test {
         // adding more liquidity before the deadline without changing the deadline
         liquidityLocking.addLiquidity(
             LiquidityLocking.AddLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 100 ether,
                 100 ether,
@@ -712,8 +680,8 @@ contract LiquidtyLockingTest is Deployers, Test {
 
         liquidityLocking.addLiquidity(
             LiquidityLocking.AddLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 100 ether,
                 100 ether,
@@ -787,8 +755,8 @@ contract LiquidtyLockingTest is Deployers, Test {
 
         liquidityLocking.addLiquidity(
             LiquidityLocking.AddLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 100 ether,
                 100 ether,
@@ -865,8 +833,8 @@ contract LiquidtyLockingTest is Deployers, Test {
             .liquidityShare;
         liquidityLocking.removeLiquidity(
             LiquidityLocking.RemoveLiquidityParams(
-                _poolKey.currency0,
-                _poolKey.currency1,
+                currency0,
+                currency1,
                 3000,
                 liquiditySharesToRemove,
                 MAX_DEADLINE

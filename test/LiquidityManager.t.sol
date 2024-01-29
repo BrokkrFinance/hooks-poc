@@ -2,27 +2,21 @@
 pragma solidity ^0.8.13;
 
 import {LiquidityManager} from "../src/liquidityManager/LiquidityManager.sol";
-import {LiquidityManagerLib} from "../src/liquidityManager/LiquidityManagerLib.sol";
-import {CallbackData, InitParams, PoolInfo, AddLiquidityParams, RemoveLiquidityParams, MIN_TICK, MAX_TICK, TICK_SPACING, FIXED_POINT_SCALING, INITIAL_LIQUIDITY} from "../src/liquidityManager/LiquidityManagerStructs.sol";
-import {Utils} from "../src/utils/Utils.sol";
+import {InitParams, PoolInfo, AddLiquidityParams, RemoveLiquidityParams, FIXED_POINT_SCALING, INITIAL_LIQUIDITY} from "../src/liquidityManager/LiquidityManagerStructs.sol";
 
-import {MockERC20} from "@uniswap/v4-core/test/foundry-tests/utils/MockERC20.sol";
-import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
-import {IHooks} from "@uniswap/v4-core/contracts/interfaces/IHooks.sol";
-import {PoolManager} from "@uniswap/v4-core/contracts/PoolManager.sol";
-import {TickMath} from "@uniswap/v4-core/contracts/libraries/TickMath.sol";
-import {FixedPoint96} from "@uniswap/v4-core/contracts/libraries/FixedPoint96.sol";
-import {Deployers} from "@uniswap/v4-core/test/foundry-tests/utils/Deployers.sol";
-import {Currency, CurrencyLibrary} from "@uniswap/v4-core/contracts/types/Currency.sol";
-import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
-import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/contracts/types/PoolId.sol";
-import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
-import {PoolModifyPositionTest} from "@uniswap/v4-core/contracts/test/PoolModifyPositionTest.sol";
-import {PoolSwapTest} from "@uniswap/v4-core/contracts/test/PoolSwapTest.sol";
-import {UniswapV4ERC20} from "@uniswap/periphery-next/contracts/libraries/UniswapV4ERC20.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
+import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 
-import {BaseHook} from "@uniswap/periphery-next/contracts/BaseHook.sol";
+import {MockERC20} from "solmate/test/utils/mocks/MockERC20.sol";
 
 import {Test, console, console2} from "forge-std/Test.sol";
 
@@ -33,21 +27,20 @@ contract LiquidtyManagementTest is Deployers, Test {
     LiquidityManager liquidityManager =
         LiquidityManager(
             address(
-                uint160(Hooks.BEFORE_INITIALIZE_FLAG | Hooks.AFTER_SWAP_FLAG)
+                uint160(
+                    Hooks.BEFORE_INITIALIZE_FLAG |
+                        Hooks.AFTER_SWAP_FLAG |
+                        Hooks.ACCESS_LOCK_FLAG
+                )
             )
         );
 
     using PoolIdLibrary for PoolKey;
 
-    PoolManager poolManager;
-
     MockERC20 token0;
     MockERC20 token1;
     PoolKey poolKey;
     PoolId poolId;
-
-    PoolSwapTest swapRouter;
-    PoolModifyPositionTest modifyPositionRouter;
 
     uint256 constant MAX_DEADLINE = 12329839823;
 
@@ -58,45 +51,36 @@ contract LiquidtyManagementTest is Deployers, Test {
     );
 
     function setUp() public {
-        poolManager = Deployers.createFreshManager();
-
+        deployFreshManagerAndRouters();
         deployCodeTo(
             "LiquidityManager.sol",
-            abi.encode(poolManager, address(this)),
+            abi.encode(manager, address(this)),
             address(liquidityManager)
         );
 
-        // create a pool with VolumeFee hook
-        (poolKey, poolId) = Utils.createPool(
-            poolManager,
-            IHooks(address(liquidityManager)),
+        (currency0, currency1) = deployMintAndApprove2Currencies();
+
+        token0 = MockERC20(Currency.unwrap(currency0));
+        token1 = MockERC20(Currency.unwrap(currency1));
+        token0.approve(address(liquidityManager), type(uint256).max);
+        token1.approve(address(liquidityManager), type(uint256).max);
+
+        // create a pool with LiquidityManager hook
+        (poolKey, poolId) = initPool(
+            currency0,
+            currency1,
+            IHooks(liquidityManager),
             3000,
-            60,
             SQRT_RATIO_1_1,
             abi.encode(InitParams(12, 5, 20 * FIXED_POINT_SCALING))
         );
-
-        swapRouter = new PoolSwapTest(poolManager);
-        modifyPositionRouter = new PoolModifyPositionTest(poolManager);
-        token0 = MockERC20(Currency.unwrap(poolKey.currency0));
-        token1 = MockERC20(Currency.unwrap(poolKey.currency1));
-        token0.mint(address(this), 1000000 ether);
-        token1.mint(address(this), 1000000 ether);
-        token0.approve(address(swapRouter), type(uint256).max);
-        token1.approve(address(swapRouter), type(uint256).max);
-        token0.approve(address(modifyPositionRouter), type(uint256).max);
-        token1.approve(address(modifyPositionRouter), type(uint256).max);
-        token0.approve(address(poolManager), type(uint256).max);
-        token1.approve(address(poolManager), type(uint256).max);
-        token0.approve(address(liquidityManager), type(uint256).max);
-        token1.approve(address(liquidityManager), type(uint256).max);
 
         address charlie = makeAddr("charlie");
         vm.startPrank(charlie);
         token0.mint(charlie, 100000 ether);
         token1.mint(charlie, 100000 ether);
-        token0.approve(address(modifyPositionRouter), type(uint256).max);
-        token1.approve(address(modifyPositionRouter), type(uint256).max);
+        token0.approve(address(modifyLiquidityRouter), type(uint256).max);
+        token1.approve(address(modifyLiquidityRouter), type(uint256).max);
         token0.approve(address(liquidityManager), type(uint256).max);
         token1.approve(address(liquidityManager), type(uint256).max);
 
@@ -125,9 +109,9 @@ contract LiquidtyManagementTest is Deployers, Test {
         );
 
         // provide liquidty to the full range through a router contract
-        modifyPositionRouter.modifyPosition(
+        modifyLiquidityRouter.modifyLiquidity(
             poolKey,
-            IPoolManager.ModifyPositionParams(
+            IPoolManager.ModifyLiquidityParams(
                 TickMath.minUsableTick(60),
                 TickMath.maxUsableTick(60),
                 95240000000000000
@@ -170,7 +154,7 @@ contract LiquidtyManagementTest is Deployers, Test {
                     ? TickMath.MIN_SQRT_RATIO + 1
                     : TickMath.MAX_SQRT_RATIO - 1
             ),
-            PoolSwapTest.TestSettings(true, true),
+            PoolSwapTest.TestSettings(true, true, false),
             ZERO_BYTES
         );
     }
@@ -179,16 +163,16 @@ contract LiquidtyManagementTest is Deployers, Test {
         address user
     ) internal view returns (ContractState memory contractState) {
         contractState.poolManagerToken0Balance = poolKey.currency0.balanceOf(
-            address(poolManager)
+            address(manager)
         );
         contractState.poolManagerToken1Balance = poolKey.currency1.balanceOf(
-            address(poolManager)
+            address(manager)
         );
         contractState.poolManagerToken0Balance = poolKey.currency0.balanceOf(
-            address(poolManager)
+            address(manager)
         );
         contractState.poolManagerToken1Balance = poolKey.currency1.balanceOf(
-            address(poolManager)
+            address(manager)
         );
         contractState.userToken0Balance = poolKey.currency0.balanceOf(
             address(user)
@@ -217,9 +201,8 @@ contract LiquidtyManagementTest is Deployers, Test {
         (
             contractState.poolSqrtCurrentPriceX96,
             contractState.poolTick,
-            ,
 
-        ) = poolManager.getSlot0(poolId);
+        ) = manager.getSlot0(poolId);
 
         (
             contractState.fullRangeLiquidity,
@@ -514,7 +497,6 @@ contract LiquidtyManagementTest is Deployers, Test {
             1e16,
             "token1Balance mismatch"
         );
-
         // user transferred the right amount of tokens
         assertApproxEqRel(
             contractStateAfterAddingLiquidity

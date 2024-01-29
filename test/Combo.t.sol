@@ -1,39 +1,31 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
 
+import {UniswapV4ERC20} from "../src/periphery/UniswapV4ERC20.sol";
 import {LiquidityLocking, FIXED_POINT_SCALING} from "../src/LiquidityLocking.sol";
 
-import {VolumeFee, FEE_INCREASE_TOKEN1_UNIT, FEE_DECREASE_TIME_UNIT, MINIMUM_FEE, MAXIMUM_FEE} from "../src/VolumeFee.sol";
+import {VolumeFee} from "../src/VolumeFee.sol";
 import {Combo} from "../src/Combo.sol";
-import {Utils} from "../src/utils/Utils.sol";
 
-import {PoolManager} from "@uniswap/v4-core/contracts/PoolManager.sol";
-import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
-import {IHooks} from "@uniswap/v4-core/contracts/interfaces/IHooks.sol";
-import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
-import {FeeLibrary} from "@uniswap/v4-core/contracts/libraries/FeeLibrary.sol";
-import {TickMath} from "@uniswap/v4-core/contracts/libraries/TickMath.sol";
-import {PoolSwapTest} from "@uniswap/v4-core/contracts/test/PoolSwapTest.sol";
-import {Currency, CurrencyLibrary} from "@uniswap/v4-core/contracts/types/Currency.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/contracts/types/PoolId.sol";
-import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
-import {Deployers} from "@uniswap/v4-core/test/foundry-tests/utils/Deployers.sol";
-import {MockERC20} from "@uniswap/v4-core/test/foundry-tests/utils/MockERC20.sol";
-import {PoolModifyPositionTest} from "@uniswap/v4-core/contracts/test/PoolModifyPositionTest.sol";
-import {UniswapV4ERC20} from "@uniswap/periphery-next/contracts/libraries/UniswapV4ERC20.sol";
-import {FixedPoint96} from "@uniswap/v4-core/contracts/libraries/FixedPoint96.sol";
-import {SafeCast} from "@uniswap/v4-core/contracts/libraries/SafeCast.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {FeeLibrary} from "@uniswap/v4-core/src/libraries/FeeLibrary.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
+import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
 
-import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
-
-import {BaseHook} from "@uniswap/periphery-next/contracts/BaseHook.sol";
+import {MockERC20} from "solmate/test/utils/mocks/MockERC20.sol";
 
 import {Test, console, console2} from "forge-std/Test.sol";
 import {GasSnapshot} from "forge-gas-snapshot/GasSnapshot.sol";
 
 contract ComboTest is Test, Deployers, GasSnapshot {
     using CurrencyLibrary for Currency;
-    using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
 
     Combo combo =
@@ -43,22 +35,16 @@ contract ComboTest is Test, Deployers, GasSnapshot {
                     Hooks.BEFORE_INITIALIZE_FLAG |
                         Hooks.BEFORE_SWAP_FLAG |
                         Hooks.AFTER_SWAP_FLAG |
-                        Hooks.BEFORE_MODIFY_POSITION_FLAG
+                        Hooks.BEFORE_ADD_LIQUIDITY_FLAG
                 )
             )
         );
-
-    using PoolIdLibrary for PoolKey;
-
-    PoolManager poolManager;
 
     MockERC20 token0;
     MockERC20 token1;
     PoolKey poolKey;
     PoolId poolId;
     UniswapV4ERC20 rewardToken;
-
-    PoolSwapTest swapRouter;
 
     uint256 constant MAX_DEADLINE = 12329839823;
     uint256 constant INITIAL_BLOCK_TIMESTAMP = 100;
@@ -73,19 +59,25 @@ contract ComboTest is Test, Deployers, GasSnapshot {
     function setUp() public {
         vm.warp(INITIAL_BLOCK_TIMESTAMP);
 
-        poolManager = Deployers.createFreshManager();
+        deployFreshManagerAndRouters();
         deployCodeTo(
             "Combo.sol",
-            abi.encode(poolManager, address(this)),
+            abi.encode(manager, address(this)),
             address(combo)
         );
+        (currency0, currency1) = deployMintAndApprove2Currencies();
+
+        token0 = MockERC20(Currency.unwrap(currency0));
+        token1 = MockERC20(Currency.unwrap(currency1));
+        token0.approve(address(combo), type(uint256).max);
+        token1.approve(address(combo), type(uint256).max);
 
         // create a pool with VolumeFee hook
-        (poolKey, poolId) = Utils.createPool(
-            poolManager,
-            IHooks(address(combo)),
+        (poolKey, poolId) = initPool(
+            currency0,
+            currency1,
+            IHooks(combo),
             FeeLibrary.DYNAMIC_FEE_FLAG,
-            60,
             SQRT_RATIO_1_1,
             abi.encode(
                 Combo.InitParamsCombo(
@@ -105,17 +97,8 @@ contract ComboTest is Test, Deployers, GasSnapshot {
                 )
             )
         );
-        swapRouter = new PoolSwapTest(poolManager);
-        token0 = MockERC20(Currency.unwrap(poolKey.currency0));
-        token1 = MockERC20(Currency.unwrap(poolKey.currency1));
-        token0.mint(address(this), 1000000 ether);
-        token1.mint(address(this), 1000000 ether);
-        token0.approve(address(swapRouter), type(uint256).max);
-        token1.approve(address(swapRouter), type(uint256).max);
-        token0.approve(address(poolManager), type(uint256).max);
-        token1.approve(address(poolManager), type(uint256).max);
-        token0.approve(address(combo), type(uint256).max);
-        token1.approve(address(combo), type(uint256).max);
+
+        (, rewardToken, , , ) = combo.poolInfoLiquidityLocking(poolId);
 
         address charlie = makeAddr("charlie");
         vm.startPrank(charlie);
@@ -137,8 +120,6 @@ contract ComboTest is Test, Deployers, GasSnapshot {
             )
         );
         vm.stopPrank();
-
-        (, rewardToken, , , ) = combo.poolInfoLiquidityLocking(poolId);
     }
 
     struct ContractStateLiquidityLocking {
@@ -169,10 +150,10 @@ contract ComboTest is Test, Deployers, GasSnapshot {
             .balanceOf(address(this));
         contractStateLiquidityLocking.managerBalance0 = poolKey
             .currency0
-            .balanceOf(address(poolManager));
+            .balanceOf(address(manager));
         contractStateLiquidityLocking.managerBalance1 = poolKey
             .currency1
-            .balanceOf(address(poolManager));
+            .balanceOf(address(manager));
         (, , , contractStateLiquidityLocking.totalLiquidityShares, ) = combo
             .poolInfoLiquidityLocking(poolId);
         contractStateLiquidityLocking.lockingInfo = combo.poolUserInfo(
@@ -232,7 +213,7 @@ contract ComboTest is Test, Deployers, GasSnapshot {
                     ? TickMath.MIN_SQRT_RATIO + 1
                     : TickMath.MAX_SQRT_RATIO - 1
             ),
-            PoolSwapTest.TestSettings(true, true),
+            PoolSwapTest.TestSettings(true, true, false),
             ZERO_BYTES
         );
     }
@@ -250,7 +231,7 @@ contract ComboTest is Test, Deployers, GasSnapshot {
                 exactAmountIn,
                 sqrtPriceLimitX96
             ),
-            PoolSwapTest.TestSettings(true, true),
+            PoolSwapTest.TestSettings(true, true, false),
             ZERO_BYTES
         );
     }

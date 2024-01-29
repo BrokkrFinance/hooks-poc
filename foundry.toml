@@ -5,3 +5,6 @@ libs = ["lib"]
 gas_reports = ["src/*"]
 ffi = true
 fs_permissions = [{ access = "read-write", path = "./.forge-snapshots"}, { access = "read", path = "./out"}]
+cancun = true
+
+solc = "lib/v4-core/bin/solc-static-linux"
