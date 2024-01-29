@@ -1,36 +1,27 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.0;
 
-import {IHooks} from "@uniswap/v4-core/contracts/interfaces/IHooks.sol";
-import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
-import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
-import {BalanceDelta} from "@uniswap/v4-core/contracts/types/BalanceDelta.sol";
-import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
-abstract contract BaseHookNoState is IHooks {
-    error NotPoolManager();
+abstract contract BaseHook is IHooks {
+    using Hooks for IHooks;
+
     error HookNotImplemented();
-
-    modifier poolManagerOnly(IPoolManager poolManager) {
-        if (msg.sender != address(poolManager)) revert NotPoolManager();
-        _;
-    }
+    error NotPoolManager();
 
     constructor() {
-        validateHookAddress(this);
+        IHooks(this).validateHookPermissions(getHooksPermissions());
     }
 
-    function getHooksCalls() public pure virtual returns (Hooks.Calls memory);
-
-    function validateHookAddress(BaseHookNoState _this) internal pure virtual {
-        Hooks.validateHookAddress(_this, getHooksCalls());
-    }
-
-    function lockAcquired(
-        bytes calldata
-    ) external virtual returns (bytes memory) {
-        revert HookNotImplemented();
-    }
+    function getHooksPermissions()
+        public
+        pure
+        virtual
+        returns (Hooks.Permissions memory);
 
     function beforeInitialize(
         address,
@@ -51,19 +42,38 @@ abstract contract BaseHookNoState is IHooks {
         revert HookNotImplemented();
     }
 
-    function beforeModifyPosition(
+    function beforeAddLiquidity(
         address,
         PoolKey calldata,
-        IPoolManager.ModifyPositionParams calldata,
+        IPoolManager.ModifyLiquidityParams calldata,
         bytes calldata
     ) external virtual returns (bytes4) {
         revert HookNotImplemented();
     }
 
-    function afterModifyPosition(
+    function afterAddLiquidity(
         address,
         PoolKey calldata,
-        IPoolManager.ModifyPositionParams calldata,
+        IPoolManager.ModifyLiquidityParams calldata,
+        BalanceDelta,
+        bytes calldata
+    ) external virtual returns (bytes4) {
+        revert HookNotImplemented();
+    }
+
+    function beforeRemoveLiquidity(
+        address,
+        PoolKey calldata,
+        IPoolManager.ModifyLiquidityParams calldata,
+        bytes calldata
+    ) external virtual returns (bytes4) {
+        revert HookNotImplemented();
+    }
+
+    function afterRemoveLiquidity(
+        address,
+        PoolKey calldata,
+        IPoolManager.ModifyLiquidityParams calldata,
         BalanceDelta,
         bytes calldata
     ) external virtual returns (bytes4) {

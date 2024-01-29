@@ -1,21 +1,20 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
-import {CallbackData, InitParams, PoolInfo, AddLiquidityParams, RemoveLiquidityParams, MIN_TICK, MAX_TICK, TICK_SPACING} from "./LiquidityManagerStructs.sol";
+import {LiquidityAmounts} from "../periphery/LiquidityAmounts.sol";
+import {PoolInfo, MIN_TICK, MAX_TICK, TICK_SPACING} from "./LiquidityManagerStructs.sol";
 
-import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/contracts/types/BalanceDelta.sol";
-import {CurrencyLibrary, Currency} from "@uniswap/v4-core/contracts/types/Currency.sol";
-import {FixedPoint96} from "@uniswap/v4-core/contracts/libraries/FixedPoint96.sol";
-import {FullMath} from "@uniswap/v4-core/contracts/libraries/FullMath.sol";
-import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/contracts/types/PoolId.sol";
-import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
-import {TickMath} from "@uniswap/v4-core/contracts/libraries/TickMath.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-
-import {LiquidityAmounts} from "@uniswap/periphery-next/contracts/libraries/LiquidityAmounts.sol";
 
 library LiquidityManagerLib {
     using CurrencyLibrary for Currency;
@@ -131,7 +130,7 @@ library LiquidityManagerLib {
             );
     }
 
-    function createModifyPositionParams(
+    function createModifyLiquidityParams(
         int256 fullRangeLiquidity,
         int256 narrowRangeLiquidity,
         PoolInfo storage poolInfo
@@ -139,18 +138,18 @@ library LiquidityManagerLib {
         internal
         view
         returns (
-            IPoolManager.ModifyPositionParams[] memory modifyPositionParams
+            IPoolManager.ModifyLiquidityParams[] memory modifyLiquidityParams
         )
     {
-        modifyPositionParams = new IPoolManager.ModifyPositionParams[](2);
+        modifyLiquidityParams = new IPoolManager.ModifyLiquidityParams[](2);
 
-        modifyPositionParams[0] = IPoolManager.ModifyPositionParams({
+        modifyLiquidityParams[0] = IPoolManager.ModifyLiquidityParams({
             tickLower: MIN_TICK,
             tickUpper: MAX_TICK,
             liquidityDelta: fullRangeLiquidity
         });
 
-        modifyPositionParams[1] = IPoolManager.ModifyPositionParams({
+        modifyLiquidityParams[1] = IPoolManager.ModifyLiquidityParams({
             tickLower: poolInfo.centerTick -
                 TICK_SPACING *
                 poolInfo.halfRangeWidthInTickSpaces,
@@ -177,7 +176,7 @@ library LiquidityManagerLib {
             uint256 narrowRangeToken1
         )
     {
-        (uint160 sqrtCurrentPriceX96, , , ) = poolManager.getSlot0(poolId);
+        (uint160 sqrtCurrentPriceX96, , ) = poolManager.getSlot0(poolId);
 
         fullRangeLiquidity = poolManager
             .getPosition(poolId, address(this), MIN_TICK, MAX_TICK)

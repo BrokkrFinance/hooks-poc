@@ -1,39 +1,32 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
 
-import {VolumeFee, FEE_INCREASE_TOKEN1_UNIT, FEE_DECREASE_TIME_UNIT, MINIMUM_FEE, MAXIMUM_FEE} from "../src/VolumeFee.sol";
-import {Utils} from "../src/utils/Utils.sol";
+import {VolumeFee, FEE_INCREASE_TOKEN1_UNIT, FEE_DECREASE_TIME_UNIT, MAXIMUM_FEE} from "../src/VolumeFee.sol";
 
-import {PoolManager} from "@uniswap/v4-core/contracts/PoolManager.sol";
-import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
-import {IHooks} from "@uniswap/v4-core/contracts/interfaces/IHooks.sol";
-import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
-import {FeeLibrary} from "@uniswap/v4-core/contracts/libraries/FeeLibrary.sol";
-import {TickMath} from "@uniswap/v4-core/contracts/libraries/TickMath.sol";
-import {PoolSwapTest} from "@uniswap/v4-core/contracts/test/PoolSwapTest.sol";
-import {Currency, CurrencyLibrary} from "@uniswap/v4-core/contracts/types/Currency.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/contracts/types/PoolId.sol";
-import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
-import {Deployers} from "@uniswap/v4-core/test/foundry-tests/utils/Deployers.sol";
-import {MockERC20} from "@uniswap/v4-core/test/foundry-tests/utils/MockERC20.sol";
-import {PoolModifyPositionTest} from "@uniswap/v4-core/contracts/test/PoolModifyPositionTest.sol";
-import {UniswapV4ERC20} from "@uniswap/periphery-next/contracts/libraries/UniswapV4ERC20.sol";
-import {FixedPoint96} from "@uniswap/v4-core/contracts/libraries/FixedPoint96.sol";
-import {SafeCast} from "@uniswap/v4-core/contracts/libraries/SafeCast.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {FeeLibrary} from "@uniswap/v4-core/src/libraries/FeeLibrary.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
+import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
+import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
 
+import {MockERC20} from "solmate/test/utils/mocks/MockERC20.sol";
 import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
-
-import {BaseHook} from "@uniswap/periphery-next/contracts/BaseHook.sol";
 
 import {Test, console, console2} from "forge-std/Test.sol";
 import {GasSnapshot} from "forge-gas-snapshot/GasSnapshot.sol";
 
 contract VolumeFeeTest is Test, Deployers, GasSnapshot {
     using CurrencyLibrary for Currency;
-    using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
 
-    VolumeFee _volumeFee =
+    VolumeFee volumeFee =
         VolumeFee(
             address(
                 uint160(
@@ -46,20 +39,14 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
 
     using PoolIdLibrary for PoolKey;
 
-    PoolManager _manager;
+    MockERC20 token0;
+    MockERC20 token1;
 
-    MockERC20 _token0;
-    MockERC20 _token1;
-    PoolKey _poolKey;
-    PoolId _poolId;
+    PoolKey poolKey;
+    PoolId poolId;
 
-    MockERC20 _gasComparisonToken0;
-    MockERC20 _gasComparisonToken1;
-    PoolKey _gasComparisonPoolKey;
-    PoolId _gasComparisonPoolId;
-
-    PoolSwapTest _swapRouter;
-    PoolModifyPositionTest _modifyPositionRouter;
+    PoolKey gasComparisonPoolKey;
+    PoolId gasComparisonPoolId;
 
     uint256 constant MAX_DEADLINE = 12329839823;
     uint256 constant INITIAL_BLOCK_TIMESTAMP = 100;
@@ -70,19 +57,23 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
     function setUp() public {
         vm.warp(INITIAL_BLOCK_TIMESTAMP);
 
-        _manager = Deployers.createFreshManager();
+        deployFreshManagerAndRouters();
         deployCodeTo(
             "VolumeFee.sol",
-            abi.encode(_manager, address(this)),
-            address(_volumeFee)
+            abi.encode(manager, address(this)),
+            address(volumeFee)
         );
+        (currency0, currency1) = deployMintAndApprove2Currencies();
+
+        token0 = MockERC20(Currency.unwrap(currency0));
+        token1 = MockERC20(Currency.unwrap(currency1));
 
         // create a pool with VolumeFee hook
-        (_poolKey, _poolId) = Utils.createPool(
-            _manager,
-            IHooks(address(_volumeFee)),
+        (poolKey, poolId) = initPool(
+            currency0,
+            currency1,
+            IHooks(volumeFee),
             FeeLibrary.DYNAMIC_FEE_FLAG,
-            60,
             SQRT_RATIO_1_2,
             abi.encode(
                 VolumeFee.InitParams(
@@ -92,23 +83,11 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
                 )
             )
         );
-        _swapRouter = new PoolSwapTest(_manager);
-        _modifyPositionRouter = new PoolModifyPositionTest(_manager);
-        _token0 = MockERC20(Currency.unwrap(_poolKey.currency0));
-        _token1 = MockERC20(Currency.unwrap(_poolKey.currency1));
-        _token0.mint(address(this), 1000000 ether);
-        _token1.mint(address(this), 1000000 ether);
-        _token0.approve(address(_swapRouter), type(uint256).max);
-        _token1.approve(address(_swapRouter), type(uint256).max);
-        _token0.approve(address(_modifyPositionRouter), type(uint256).max);
-        _token1.approve(address(_modifyPositionRouter), type(uint256).max);
-        _token0.approve(address(_manager), type(uint256).max);
-        _token1.approve(address(_manager), type(uint256).max);
 
         // providing liquidity for the pool with VolumeFee hook
-        _modifyPositionRouter.modifyPosition(
-            _poolKey,
-            IPoolManager.ModifyPositionParams(
+        modifyLiquidityRouter.modifyLiquidity(
+            poolKey,
+            IPoolManager.ModifyLiquidityParams(
                 TickMath.minUsableTick(60),
                 TickMath.maxUsableTick(60),
                 500000 ether
@@ -117,39 +96,19 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
         );
 
         // create a pool without any hooks for gas comparison
-        (_gasComparisonPoolKey, _gasComparisonPoolId) = Utils.createPool(
-            _manager,
+        (gasComparisonPoolKey, gasComparisonPoolId) = initPool(
+            currency0,
+            currency1,
             IHooks(address(0)),
-            2000,
-            60,
+            3000,
             SQRT_RATIO_1_2,
             ZERO_BYTES
         );
-        _gasComparisonToken0 = MockERC20(
-            Currency.unwrap(_gasComparisonPoolKey.currency0)
-        );
-        _gasComparisonToken1 = MockERC20(
-            Currency.unwrap(_gasComparisonPoolKey.currency1)
-        );
-        _gasComparisonToken0.mint(address(this), 1000000 ether);
-        _gasComparisonToken1.mint(address(this), 1000000 ether);
-        _gasComparisonToken0.approve(address(_swapRouter), type(uint256).max);
-        _gasComparisonToken1.approve(address(_swapRouter), type(uint256).max);
-        _gasComparisonToken0.approve(
-            address(_modifyPositionRouter),
-            type(uint256).max
-        );
-        _gasComparisonToken1.approve(
-            address(_modifyPositionRouter),
-            type(uint256).max
-        );
-        _gasComparisonToken0.approve(address(_manager), type(uint256).max);
-        _gasComparisonToken1.approve(address(_manager), type(uint256).max);
 
         // providing liquidity for the pool without any hooks
-        _modifyPositionRouter.modifyPosition(
-            _gasComparisonPoolKey,
-            IPoolManager.ModifyPositionParams(
+        modifyLiquidityRouter.modifyLiquidity(
+            gasComparisonPoolKey,
+            IPoolManager.ModifyLiquidityParams(
                 TickMath.minUsableTick(60),
                 TickMath.maxUsableTick(60),
                 500000 ether
@@ -175,18 +134,18 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
             contractState.token1SoFar,
             contractState.lastFeeDecreaseTime,
             contractState.currentFee
-        ) = _volumeFee.poolInfos(_poolId);
+        ) = volumeFee.poolInfos(poolId);
     }
 
     function swapExactTokensForTokens(
-        PoolKey memory poolKey,
+        PoolKey memory poolKey_,
         bool zeroForOne,
         int256 exactAmountIn,
         string memory testName
     ) private {
         snapStart(testName);
-        _swapRouter.swap(
-            poolKey,
+        swapRouter.swap(
+            poolKey_,
             IPoolManager.SwapParams(
                 zeroForOne,
                 exactAmountIn,
@@ -194,7 +153,7 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
                     ? TickMath.MIN_SQRT_RATIO + 1
                     : TickMath.MAX_SQRT_RATIO - 1
             ),
-            PoolSwapTest.TestSettings(true, true),
+            PoolSwapTest.TestSettings(true, true, false),
             ZERO_BYTES
         );
         snapEnd();
@@ -207,14 +166,14 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
         string memory testName
     ) private {
         snapStart(testName);
-        _swapRouter.swap(
-            _poolKey,
+        swapRouter.swap(
+            poolKey,
             IPoolManager.SwapParams(
                 zeroForOne,
                 exactAmountIn,
                 sqrtPriceLimitX96
             ),
-            PoolSwapTest.TestSettings(true, true),
+            PoolSwapTest.TestSettings(true, true, false),
             ZERO_BYTES
         );
         snapEnd();
@@ -246,7 +205,7 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
     function testVolumeFee_feeIncreaseTriggeredImmediatelySwapToken0() public {
         uint256 amountToSwap = 2 ether;
         swapExactTokensForTokens(
-            _poolKey,
+            poolKey,
             true,
             int256(amountToSwap),
             "testVolumeFee_feeIncreaseTriggeredImmediatelySwapToken0"
@@ -268,7 +227,7 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
     function testVolumeFee_feeIncreaseTriggeredImmediatelySwapToken1() public {
         uint256 amountToSwap = 1 ether;
         swapExactTokensForTokens(
-            _poolKey,
+            poolKey,
             false,
             int256(amountToSwap),
             "testVolumeFee_feeIncreaseTriggeredImmediatelySwapToken1"
@@ -338,7 +297,7 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
     {
         uint256 amountToSwap = 0.36 ether;
         swapExactTokensForTokens(
-            _gasComparisonPoolKey,
+            gasComparisonPoolKey,
             true,
             int256(amountToSwap),
             "testVolumeFee_feeIncreaseTriggeredForSecondSwapToken0GasComparisonFirst"
@@ -346,7 +305,7 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
 
         uint256 amountToSwapSecondTime = 0.08 ether;
         swapExactTokensForTokens(
-            _gasComparisonPoolKey,
+            gasComparisonPoolKey,
             true,
             int256(amountToSwapSecondTime),
             "testVolumeFee_feeIncreaseTriggeredForSecondSwapToken0GasComparisonSecond"
@@ -356,7 +315,7 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
     function testVolumeFee_feeIncreaseTriggeredForSecondSwapToken0() public {
         uint256 amountToSwap = 0.36 ether;
         swapExactTokensForTokens(
-            _poolKey,
+            poolKey,
             true,
             int256(amountToSwap),
             "testVolumeFee_feeIncreaseTriggeredForSecondSwapToken0First"
@@ -372,7 +331,7 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
 
         uint256 amountToSwapSecondTime = 0.08 ether;
         swapExactTokensForTokens(
-            _poolKey,
+            poolKey,
             true,
             int256(amountToSwapSecondTime),
             "testVolumeFee_feeIncreaseTriggeredForSecondSwapToken0Second"
@@ -396,7 +355,7 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
         // increases the fee by 90bps
         uint256 amountToSwap = 0.18 ether;
         swapExactTokensForTokens(
-            _poolKey,
+            poolKey,
             false,
             int256(amountToSwap),
             "testVolumeFee_feeIncreaseTriggeredForSecondSwapToken1Frist"
@@ -412,7 +371,7 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
 
         uint256 amountToSwapSecondTime = 0.03 ether;
         swapExactTokensForTokens(
-            _poolKey,
+            poolKey,
             false,
             int256(amountToSwapSecondTime),
             "testVolumeFee_feeIncreaseTriggeredForSecondSwapToken1Second"
@@ -442,9 +401,9 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
 
         vm.warp(WARP_TIME);
 
-        uint256 amountToSwap = 1 wei;
+        uint256 amountToSwap = 100 wei;
         swapExactTokensForTokens(
-            _poolKey,
+            poolKey,
             false,
             int256(amountToSwap),
             "testVolumeFee_feeIncreaseTriggeredByTime"
@@ -481,9 +440,9 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
 
         vm.warp(WARP_TIME1);
 
-        uint256 amountToSwap = 1 wei;
+        uint256 amountToSwap = 100 wei;
         swapExactTokensForTokens(
-            _poolKey,
+            poolKey,
             false,
             int256(amountToSwap),
             "testVolumeFee_feeIncreaseTriggeredByTimeForSecondSwapFirst"
@@ -500,7 +459,7 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
         vm.warp(WARP_TIME2);
 
         swapExactTokensForTokens(
-            _poolKey,
+            poolKey,
             false,
             int256(amountToSwap),
             "testVolumeFee_feeIncreaseTriggeredByTimeForSecondSwapSecond"
@@ -525,7 +484,7 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
     function testVolumeFee_feeIncreaseMaximumFeeReached() public {
         uint256 amountToSwap = (MAXIMUM_FEE * 1e18) * 2;
         swapExactTokensForTokens(
-            _poolKey,
+            poolKey,
             false,
             int256(amountToSwap),
             "testVolumeFee_feeIncreaseMaximumFeeReached"
@@ -552,7 +511,7 @@ contract VolumeFeeTest is Test, Deployers, GasSnapshot {
 
         uint256 amountToSwap = 0.2 ether;
         swapExactTokensForTokens(
-            _poolKey,
+            poolKey,
             false,
             int256(amountToSwap),
             "testVolumeFee_feeIncreaseAndDecreaseAtSameSwap"

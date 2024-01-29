@@ -2,36 +2,32 @@
 pragma solidity ^0.8.19;
 
 import {Utils} from "../utils/Utils.sol";
-import {BaseHookNoState} from "../utils/BaseHookNoState.sol";
+import {LiquidityAmounts} from "../periphery/LiquidityAmounts.sol";
+import {UniswapV4ERC20} from "../periphery/UniswapV4ERC20.sol";
+import {BaseHook} from "../utils/BaseHook.sol";
 import {LiquidityManagerLib} from "./LiquidityManagerLib.sol";
-import {CallbackData, InitParams, PoolInfo, AddLiquidityParams, RemoveLiquidityParams, MIN_TICK, MAX_TICK, TICK_SPACING, FIXED_POINT_SCALING, INITIAL_LIQUIDITY} from "./LiquidityManagerStructs.sol";
+import {CallbackData, InitParams, PoolInfo, AddLiquidityParams, RemoveLiquidityParams, TICK_SPACING, FIXED_POINT_SCALING, INITIAL_LIQUIDITY} from "./LiquidityManagerStructs.sol";
 
-import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
-import {PoolManager} from "@uniswap/v4-core/contracts/PoolManager.sol";
-import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
-import {BaseHook} from "@uniswap/periphery-next/contracts/BaseHook.sol";
-import {SafeCast} from "@uniswap/v4-core/contracts/libraries/SafeCast.sol";
-import {Position} from "@uniswap/v4-core/contracts/libraries/Position.sol";
-import {IHooks} from "@uniswap/v4-core/contracts/interfaces/IHooks.sol";
-import {CurrencyLibrary, Currency} from "@uniswap/v4-core/contracts/types/Currency.sol";
-import {TickMath} from "@uniswap/v4-core/contracts/libraries/TickMath.sol";
-import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/contracts/types/BalanceDelta.sol";
-import {ILockCallback} from "@uniswap/v4-core/contracts/interfaces/callback/ILockCallback.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/contracts/types/PoolId.sol";
-import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
-import {FullMath} from "@uniswap/v4-core/contracts/libraries/FullMath.sol";
-import {FixedPoint96} from "@uniswap/v4-core/contracts/libraries/FixedPoint96.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
-import {UniswapV4ERC20} from "@uniswap/periphery-next/contracts/libraries/UniswapV4ERC20.sol";
-import {LiquidityAmounts} from "@uniswap/periphery-next/contracts/libraries/LiquidityAmounts.sol";
-
-import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
 
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+import {console} from "forge-std/Test.sol";
 
 /*
    The LiquidtyManagement proof of concept (PoC) hook manages assets that are deployed on it. The hook divedes the deposited
@@ -53,8 +49,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
    - More unit tests need to be written.
 */
 
-contract LiquidityManager is Ownable, BaseHookNoState {
-    using CurrencyLibrary for Currency;
+contract LiquidityManager is Ownable, BaseHook {
     using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
     using SafeCast for uint128;
@@ -89,12 +84,17 @@ contract LiquidityManager is Ownable, BaseHookNoState {
         _;
     }
 
+    modifier poolManagerOnly() {
+        if (msg.sender != address(poolManager)) revert NotPoolManager();
+        _;
+    }
+
     function beforeInitialize(
         address,
         PoolKey calldata key,
         uint160 sqrtPriceX96,
         bytes calldata data
-    ) external override poolManagerOnly(poolManager) returns (bytes4) {
+    ) external override poolManagerOnly returns (bytes4) {
         InitParams memory initParams = abi.decode(data, (InitParams));
         PoolId poolId = key.toId();
 
@@ -141,7 +141,7 @@ contract LiquidityManager is Ownable, BaseHookNoState {
         });
 
         PoolId poolId = poolKey.toId();
-        (uint160 sqrtPriceX96, , , ) = poolManager.getSlot0(poolId);
+        (uint160 sqrtPriceX96, , ) = poolManager.getSlot0(poolId);
         if (sqrtPriceX96 == 0) revert PoolNotInitialized();
 
         PoolInfo storage poolInfo = poolInfos[poolId];
@@ -163,9 +163,9 @@ contract LiquidityManager is Ownable, BaseHookNoState {
                 fullRangeLiquidity;
 
             // add liquidity to the pool based on the liquidity ratio specified by the narrowToFullLiquidityRatio parameter
-            modifyPosition(
+            modifyLiquidity(
                 poolKey,
-                LiquidityManagerLib.createModifyPositionParams(
+                LiquidityManagerLib.createModifyLiquidityParams(
                     fullRangeLiquidity.toInt256(),
                     narrowRangeLiquidity.toInt256(),
                     poolInfo
@@ -184,9 +184,9 @@ contract LiquidityManager is Ownable, BaseHookNoState {
                 );
 
             // add liquidity to the pool while respecting the existing asset ratio of the assets that are managed by the hook
-            modifyPosition(
+            modifyLiquidity(
                 poolKey,
-                LiquidityManagerLib.createModifyPositionParams(
+                LiquidityManagerLib.createModifyLiquidityParams(
                     FullMath
                         .mulDivRoundingUp(
                             fullRangeLiquidity,
@@ -265,9 +265,9 @@ contract LiquidityManager is Ownable, BaseHookNoState {
                 poolInfo.halfRangeWidthInTickSpaces
             );
 
-        modifyPosition(
+        modifyLiquidity(
             poolKey,
-            LiquidityManagerLib.createModifyPositionParams(
+            LiquidityManagerLib.createModifyLiquidityParams(
                 -FullMath
                     .mulDivRoundingUp(
                         fullRangeLiquidity,
@@ -320,15 +320,15 @@ contract LiquidityManager is Ownable, BaseHookNoState {
         CallbackData memory callbackData
     ) internal returns (BalanceDelta delta) {
         collectFees(callbackData.poolKey);
-        uint256 modifyPositionParamsLength = callbackData
-            .modifyPositionParams
+        uint256 modifyLiquidityParamsLength = callbackData
+            .modifyLiquidityParams
             .length;
-        for (uint256 i; i < modifyPositionParamsLength; i++) {
+        for (uint256 i; i < modifyLiquidityParamsLength; i++) {
             delta =
                 delta +
-                poolManager.modifyPosition(
+                poolManager.modifyLiquidity(
                     callbackData.poolKey,
-                    callbackData.modifyPositionParams[i],
+                    callbackData.modifyLiquidityParams[i],
                     ZERO_BYTES
                 );
         }
@@ -354,7 +354,7 @@ contract LiquidityManager is Ownable, BaseHookNoState {
     ) public view returns (bool) {
         PoolId poolId = poolKey.toId();
         PoolInfo storage poolInfo = poolInfos[poolId];
-        (, int24 currentTick, , ) = poolManager.getSlot0(poolId);
+        (, int24 currentTick, ) = poolManager.getSlot0(poolId);
 
         bool isNarrowRangeCenterTooFar = (Utils.abs(
             currentTick - poolInfo.centerTick
@@ -382,7 +382,10 @@ contract LiquidityManager is Ownable, BaseHookNoState {
         // rebalance if necessary
         if (isRebalanceNecessary(poolKey, forceRebalance)) {
             rebalanceInProgress = true;
-            modifyPosition(poolKey, new IPoolManager.ModifyPositionParams[](0));
+            modifyLiquidity(
+                poolKey,
+                new IPoolManager.ModifyLiquidityParams[](0)
+            );
             rebalanceInProgress = false;
             poolInfo.hasAccruedFees = true;
         }
@@ -442,9 +445,9 @@ contract LiquidityManager is Ownable, BaseHookNoState {
             )
             .liquidity;
 
-        vars.removeLiquidityDelta = poolManager.modifyPosition(
+        vars.removeLiquidityDelta = poolManager.modifyLiquidity(
             callbackData.poolKey,
-            IPoolManager.ModifyPositionParams({
+            IPoolManager.ModifyLiquidityParams({
                 tickLower: vars.tickLower,
                 tickUpper: vars.tickUpper,
                 liquidityDelta: -vars.narrowRangeLiquidity.toInt128()
@@ -460,7 +463,7 @@ contract LiquidityManager is Ownable, BaseHookNoState {
         );
 
         // 2. swap sufficient amount
-        (vars.sqrtPriceCurrentX96, vars.oldTick, , ) = poolManager.getSlot0(
+        (vars.sqrtPriceCurrentX96, vars.oldTick, ) = poolManager.getSlot0(
             vars.poolId
         );
         (vars.swapAmount, vars.zeroForOne) = LiquidityManagerLib
@@ -482,7 +485,7 @@ contract LiquidityManager is Ownable, BaseHookNoState {
         );
 
         // 3. adding back liquidity to the narrow range
-        (vars.sqrtPriceCurrentX96, vars.currentTick, , ) = poolManager.getSlot0(
+        (vars.sqrtPriceCurrentX96, vars.currentTick, ) = poolManager.getSlot0(
             vars.poolId
         );
 
@@ -515,9 +518,9 @@ contract LiquidityManager is Ownable, BaseHookNoState {
             )
         );
 
-        vars.addLiquidityDelta = poolManager.modifyPosition(
+        vars.addLiquidityDelta = poolManager.modifyLiquidity(
             callbackData.poolKey,
-            IPoolManager.ModifyPositionParams({
+            IPoolManager.ModifyLiquidityParams({
                 tickLower: vars.newTickLower,
                 tickUpper: vars.newTickUpper,
                 liquidityDelta: int256(int128(liquidityToProvide))
@@ -553,23 +556,27 @@ contract LiquidityManager is Ownable, BaseHookNoState {
         );
     }
 
-    function modifyPosition(
+    function modifyLiquidity(
         PoolKey memory key,
-        IPoolManager.ModifyPositionParams[] memory params
+        IPoolManager.ModifyLiquidityParams[] memory params
     ) internal returns (BalanceDelta delta) {
         delta = abi.decode(
-            poolManager.lock(abi.encode(CallbackData(msg.sender, key, params))),
+            poolManager.lock(
+                address(this),
+                abi.encode(CallbackData(msg.sender, key, params))
+            ),
             (BalanceDelta)
         );
     }
 
     function lockAcquired(
+        address,
         bytes calldata rawData
-    ) external override poolManagerOnly(poolManager) returns (bytes memory) {
+    ) external poolManagerOnly returns (bytes memory) {
         CallbackData memory callbackData = abi.decode(rawData, (CallbackData));
 
         BalanceDelta delta;
-        if (callbackData.modifyPositionParams.length == 0) {
+        if (callbackData.modifyLiquidityParams.length == 0) {
             delta = rebalanceCallback(callbackData);
         } else {
             delta = modifyLiquidityCallback(callbackData);
@@ -583,16 +590,16 @@ contract LiquidityManager is Ownable, BaseHookNoState {
         PoolInfo storage poolInfo = poolInfos[poolId];
         if (poolInfo.hasAccruedFees) {
             BalanceDelta delta;
-            IPoolManager.ModifyPositionParams[]
-                memory modifyPositionParams = LiquidityManagerLib
-                    .createModifyPositionParams(0, 0, poolInfo);
-            uint256 modifyPositionParamsLength = modifyPositionParams.length;
-            for (uint256 i; i < modifyPositionParamsLength; i++) {
+            IPoolManager.ModifyLiquidityParams[]
+                memory modifyLiquidityParams = LiquidityManagerLib
+                    .createModifyLiquidityParams(0, 0, poolInfo);
+            uint256 modifyLiquidityParamsLength = modifyLiquidityParams.length;
+            for (uint256 i; i < modifyLiquidityParamsLength; i++) {
                 delta =
                     delta +
-                    poolManager.modifyPosition(
+                    poolManager.modifyLiquidity(
                         poolKey,
-                        modifyPositionParams[i],
+                        modifyLiquidityParams[i],
                         ZERO_BYTES
                     );
             }
@@ -650,17 +657,26 @@ contract LiquidityManager is Ownable, BaseHookNoState {
             );
     }
 
-    function getHooksCalls() public pure override returns (Hooks.Calls memory) {
+    function getHooksPermissions()
+        public
+        pure
+        override
+        returns (Hooks.Permissions memory)
+    {
         return
-            Hooks.Calls({
+            Hooks.Permissions({
                 beforeInitialize: true,
                 afterInitialize: false,
-                beforeModifyPosition: false,
-                afterModifyPosition: false,
+                beforeAddLiquidity: false,
+                afterAddLiquidity: false,
+                beforeRemoveLiquidity: false,
+                afterRemoveLiquidity: false,
                 beforeSwap: false,
                 afterSwap: true,
                 beforeDonate: false,
-                afterDonate: false
+                afterDonate: false,
+                noOp: false,
+                accessLock: true
             });
     }
 
@@ -670,7 +686,7 @@ contract LiquidityManager is Ownable, BaseHookNoState {
         IPoolManager.SwapParams calldata,
         BalanceDelta,
         bytes calldata
-    ) external virtual override poolManagerOnly(poolManager) returns (bytes4) {
+    ) external virtual override poolManagerOnly returns (bytes4) {
         PoolId poolId = poolKey.toId();
         PoolInfo storage poolInfo = poolInfos[poolId];
 

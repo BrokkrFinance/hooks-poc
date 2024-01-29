@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.19;
 
-import {BaseHookNoState} from "./utils/BaseHookNoState.sol";
+import {BaseHook} from "./utils/BaseHook.sol";
+import {LiquidityAmounts} from "./periphery/LiquidityAmounts.sol";
+import {UniswapV4ERC20} from "./periphery/UniswapV4ERC20.sol";
 
-import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
-import {PoolManager} from "@uniswap/v4-core/contracts/PoolManager.sol";
-import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
-import {SafeCast} from "@uniswap/v4-core/contracts/libraries/SafeCast.sol";
-import {IHooks} from "@uniswap/v4-core/contracts/interfaces/IHooks.sol";
-import {CurrencyLibrary, Currency} from "@uniswap/v4-core/contracts/types/Currency.sol";
-import {TickMath} from "@uniswap/v4-core/contracts/libraries/TickMath.sol";
-import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/contracts/types/BalanceDelta.sol";
-import {IERC20Minimal} from "@uniswap/v4-core/contracts/interfaces/external/IERC20Minimal.sol";
-import {ILockCallback} from "@uniswap/v4-core/contracts/interfaces/callback/ILockCallback.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/contracts/types/PoolId.sol";
-import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
-import {FullMath} from "@uniswap/v4-core/contracts/libraries/FullMath.sol";
-import {UniswapV4ERC20} from "@uniswap/periphery-next/contracts/libraries/UniswapV4ERC20.sol";
-import {LiquidityAmounts} from "@uniswap/periphery-next/contracts/libraries/LiquidityAmounts.sol";
-import {FixedPoint96} from "@uniswap/v4-core/contracts/libraries/FixedPoint96.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {CurrencyLibrary, Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {BalanceDelta, toBalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {IERC20Minimal} from "@uniswap/v4-core/src/interfaces/external/IERC20Minimal.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
+
 import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
+
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -28,7 +28,7 @@ import {console} from "forge-std/Test.sol";
 
 uint256 constant FIXED_POINT_SCALING = 1_000_000;
 
-contract LiquidityLocking is BaseHookNoState {
+contract LiquidityLocking is BaseHook {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
@@ -59,7 +59,7 @@ contract LiquidityLocking is BaseHookNoState {
     struct CallbackData {
         address sender;
         PoolKey key;
-        IPoolManager.ModifyPositionParams params;
+        IPoolManager.ModifyLiquidityParams params;
         bool applyEarlyWithdrawalPenalty;
     }
 
@@ -117,6 +117,12 @@ contract LiquidityLocking is BaseHookNoState {
         _;
     }
 
+    modifier poolManagerOnlyLiquidityLocking() {
+        if (msg.sender != address(poolManagerLiquidityLocking))
+            revert NotPoolManager();
+        _;
+    }
+
     function poolUserInfo(
         PoolId poolId,
         address user
@@ -129,13 +135,7 @@ contract LiquidityLocking is BaseHookNoState {
         PoolKey calldata key,
         uint160,
         bytes memory data
-    )
-        public
-        virtual
-        override
-        poolManagerOnly(poolManagerLiquidityLocking)
-        returns (bytes4)
-    {
+    ) public virtual override poolManagerOnlyLiquidityLocking returns (bytes4) {
         if (key.tickSpacing != 60) revert TickSpacingNotDefault();
 
         PoolId poolId = key.toId();
@@ -170,23 +170,27 @@ contract LiquidityLocking is BaseHookNoState {
         return IHooks.beforeInitialize.selector;
     }
 
-    function getHooksCalls()
+    function getHooksPermissions()
         public
         pure
         virtual
         override
-        returns (Hooks.Calls memory)
+        returns (Hooks.Permissions memory)
     {
         return
-            Hooks.Calls({
+            Hooks.Permissions({
                 beforeInitialize: true,
                 afterInitialize: false,
-                beforeModifyPosition: true,
-                afterModifyPosition: false,
+                beforeAddLiquidity: true,
+                afterAddLiquidity: false,
+                beforeRemoveLiquidity: false,
+                afterRemoveLiquidity: false,
                 beforeSwap: true,
                 afterSwap: false,
                 beforeDonate: false,
-                afterDonate: false
+                afterDonate: false,
+                noOp: false,
+                accessLock: false
             });
     }
 
@@ -210,7 +214,7 @@ contract LiquidityLocking is BaseHookNoState {
 
         PoolId poolId = key.toId();
 
-        (uint160 sqrtPriceX96, , , ) = poolManagerLiquidityLocking.getSlot0(
+        (uint160 sqrtPriceX96, , ) = poolManagerLiquidityLocking.getSlot0(
             poolId
         );
 
@@ -235,9 +239,9 @@ contract LiquidityLocking is BaseHookNoState {
         if (poolLiquidity == 0 && liquidity <= MINIMUM_LIQUIDITY) {
             revert LiquidityDoesntMeetMinimum();
         }
-        BalanceDelta addedDelta = modifyPosition(
+        BalanceDelta addedDelta = modifyLiquidity(
             key,
-            IPoolManager.ModifyPositionParams({
+            IPoolManager.ModifyLiquidityParams({
                 tickLower: MIN_TICK,
                 tickUpper: MAX_TICK,
                 liquidityDelta: liquidity.toInt256()
@@ -305,7 +309,7 @@ contract LiquidityLocking is BaseHookNoState {
             poolId
         ];
 
-        (uint160 sqrtPriceX96, , , ) = poolManagerLiquidityLocking.getSlot0(
+        (uint160 sqrtPriceX96, , ) = poolManagerLiquidityLocking.getSlot0(
             poolId
         );
 
@@ -313,9 +317,9 @@ contract LiquidityLocking is BaseHookNoState {
 
         LockingInfo storage lockingInfo = pool.lockingInfos[msg.sender];
 
-        delta = modifyPosition(
+        delta = modifyLiquidity(
             key,
-            IPoolManager.ModifyPositionParams({
+            IPoolManager.ModifyLiquidityParams({
                 tickLower: MIN_TICK,
                 tickUpper: MAX_TICK,
                 liquidityDelta: -(params.liquidity.toInt256())
@@ -350,13 +354,14 @@ contract LiquidityLocking is BaseHookNoState {
         pool.totalLiquidityShares -= params.liquidity;
     }
 
-    function modifyPosition(
+    function modifyLiquidity(
         PoolKey memory key,
-        IPoolManager.ModifyPositionParams memory params,
+        IPoolManager.ModifyLiquidityParams memory params,
         bool applyEarlyWithdrawalPenalty
     ) internal returns (BalanceDelta delta) {
         delta = abi.decode(
             poolManagerLiquidityLocking.lock(
+                address(this),
                 abi.encode(
                     CallbackData(
                         msg.sender,
@@ -371,14 +376,9 @@ contract LiquidityLocking is BaseHookNoState {
     }
 
     function lockAcquired(
+        address,
         bytes calldata rawData
-    )
-        public
-        virtual
-        override
-        poolManagerOnly(poolManagerLiquidityLocking)
-        returns (bytes memory)
-    {
+    ) public virtual poolManagerOnlyLiquidityLocking returns (bytes memory) {
         CallbackData memory data = abi.decode(rawData, (CallbackData));
         BalanceDelta delta;
 
@@ -412,7 +412,7 @@ contract LiquidityLocking is BaseHookNoState {
             }
             _takeDeltas(data.sender, data.key, delta);
         } else {
-            delta = poolManagerLiquidityLocking.modifyPosition(
+            delta = poolManagerLiquidityLocking.modifyLiquidity(
                 data.key,
                 data.params,
                 ZERO_BYTES
@@ -424,7 +424,7 @@ contract LiquidityLocking is BaseHookNoState {
 
     function _removeLiquidity(
         PoolKey memory key,
-        IPoolManager.ModifyPositionParams memory params
+        IPoolManager.ModifyLiquidityParams memory params
     ) internal returns (BalanceDelta delta) {
         PoolId poolId = key.toId();
         PoolInfoLiquidityLocking storage pool = poolInfoLiquidityLocking[
@@ -442,7 +442,7 @@ contract LiquidityLocking is BaseHookNoState {
         );
 
         params.liquidityDelta = -(liquidityToRemove.toInt256());
-        delta = poolManagerLiquidityLocking.modifyPosition(
+        delta = poolManagerLiquidityLocking.modifyLiquidity(
             key,
             params,
             ZERO_BYTES
@@ -499,9 +499,9 @@ contract LiquidityLocking is BaseHookNoState {
 
     function _rebalance(PoolKey memory key) internal {
         PoolId poolId = key.toId();
-        BalanceDelta balanceDelta = poolManagerLiquidityLocking.modifyPosition(
+        BalanceDelta balanceDelta = poolManagerLiquidityLocking.modifyLiquidity(
             key,
-            IPoolManager.ModifyPositionParams({
+            IPoolManager.ModifyLiquidityParams({
                 tickLower: MIN_TICK,
                 tickUpper: MAX_TICK,
                 liquidityDelta: -(
@@ -519,7 +519,7 @@ contract LiquidityLocking is BaseHookNoState {
             )
         ) * FixedPointMathLib.sqrt(FixedPoint96.Q96)).toUint160();
 
-        (uint160 sqrtPriceX96, , , ) = poolManagerLiquidityLocking.getSlot0(
+        (uint160 sqrtPriceX96, , ) = poolManagerLiquidityLocking.getSlot0(
             poolId
         );
 
@@ -542,9 +542,9 @@ contract LiquidityLocking is BaseHookNoState {
         );
 
         BalanceDelta balanceDeltaAfter = poolManagerLiquidityLocking
-            .modifyPosition(
+            .modifyLiquidity(
                 key,
-                IPoolManager.ModifyPositionParams({
+                IPoolManager.ModifyLiquidityParams({
                     tickLower: MIN_TICK,
                     tickUpper: MAX_TICK,
                     liquidityDelta: liquidity.toInt256()
@@ -568,21 +568,15 @@ contract LiquidityLocking is BaseHookNoState {
         );
     }
 
-    function beforeModifyPosition(
+    function beforeAddLiquidity(
         address sender,
         PoolKey calldata,
-        IPoolManager.ModifyPositionParams calldata,
+        IPoolManager.ModifyLiquidityParams calldata,
         bytes calldata
-    )
-        public
-        virtual
-        override
-        poolManagerOnly(poolManagerLiquidityLocking)
-        returns (bytes4)
-    {
+    ) public virtual override poolManagerOnlyLiquidityLocking returns (bytes4) {
         if (sender != address(this)) revert SenderMustBeHook();
 
-        return IHooks.beforeModifyPosition.selector;
+        return IHooks.beforeAddLiquidity.selector;
     }
 
     function beforeSwap(
@@ -590,13 +584,7 @@ contract LiquidityLocking is BaseHookNoState {
         PoolKey calldata key,
         IPoolManager.SwapParams calldata,
         bytes calldata
-    )
-        public
-        virtual
-        override
-        poolManagerOnly(poolManagerLiquidityLocking)
-        returns (bytes4)
-    {
+    ) public virtual override poolManagerOnlyLiquidityLocking returns (bytes4) {
         PoolId poolId = key.toId();
 
         if (!poolInfoLiquidityLocking[poolId].hasAccruedFees) {

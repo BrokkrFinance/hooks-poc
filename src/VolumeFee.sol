@@ -2,30 +2,17 @@
 pragma solidity ^0.8.19;
 
 import {Utils} from "./utils/Utils.sol";
-import {BaseHookNoState} from "./utils/BaseHookNoState.sol";
+import {BaseHook} from "./utils/BaseHook.sol";
 
-import {IPoolManager} from "@uniswap/v4-core/contracts/interfaces/IPoolManager.sol";
-import {PoolManager} from "@uniswap/v4-core/contracts/PoolManager.sol";
-import {Hooks} from "@uniswap/v4-core/contracts/libraries/Hooks.sol";
-import {SafeCast} from "@uniswap/v4-core/contracts/libraries/SafeCast.sol";
-import {IHooks} from "@uniswap/v4-core/contracts/interfaces/IHooks.sol";
-import {CurrencyLibrary, Currency} from "@uniswap/v4-core/contracts/types/Currency.sol";
-import {TickMath} from "@uniswap/v4-core/contracts/libraries/TickMath.sol";
-import {BalanceDelta, toBalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/contracts/types/BalanceDelta.sol";
-import {IERC20Minimal} from "@uniswap/v4-core/contracts/interfaces/external/IERC20Minimal.sol";
-import {ILockCallback} from "@uniswap/v4-core/contracts/interfaces/callback/ILockCallback.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/contracts/types/PoolId.sol";
-import {PoolKey} from "@uniswap/v4-core/contracts/types/PoolKey.sol";
-import {FullMath} from "@uniswap/v4-core/contracts/libraries/FullMath.sol";
-import {BaseHook} from "@uniswap/periphery-next/contracts/BaseHook.sol";
-import {IDynamicFeeManager} from "@uniswap/v4-core/contracts/interfaces/IDynamicFeeManager.sol";
-import {UniswapV4ERC20} from "@uniswap/periphery-next/contracts/libraries/UniswapV4ERC20.sol";
-import {LiquidityAmounts} from "@uniswap/periphery-next/contracts/libraries/LiquidityAmounts.sol";
-import {FixedPoint96} from "@uniswap/v4-core/contracts/libraries/FixedPoint96.sol";
-import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
-import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
-import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {BalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+
+import {IDynamicFeeManager} from "@uniswap/v4-core/src/interfaces/IDynamicFeeManager.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {console} from "forge-std/Test.sol";
@@ -51,11 +38,9 @@ uint256 constant MINIMUM_FEE_THRESHOLD = 100;
 // SWAP_MISMATCH_PCT_THRESHOLD is represented in fixed decimal point with precision of 4
 uint256 constant SWAP_MISMATCH_PCT_THRESHOLD = 99_0000;
 
-contract VolumeFee is Ownable, IDynamicFeeManager, BaseHookNoState {
-    using CurrencyLibrary for Currency;
+contract VolumeFee is Ownable, IDynamicFeeManager, BaseHook {
     using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
-    using Math for uint256;
     using SafeCast for uint128;
 
     error SWAP_AMOUNT_MISMATCH_ERROR();
@@ -91,12 +76,17 @@ contract VolumeFee is Ownable, IDynamicFeeManager, BaseHookNoState {
         poolManager = _poolManager;
     }
 
+    modifier poolManagerOnly() {
+        if (msg.sender != address(poolManager)) revert NotPoolManager();
+        _;
+    }
+
     function beforeInitialize(
         address,
         PoolKey calldata key,
         uint160,
         bytes memory data
-    ) public virtual override poolManagerOnly(poolManager) returns (bytes4) {
+    ) public virtual override poolManagerOnly returns (bytes4) {
         InitParams memory initParams = abi.decode(data, (InitParams));
 
         PoolInfo storage poolInfo = poolInfos[key.toId()];
@@ -108,77 +98,105 @@ contract VolumeFee is Ownable, IDynamicFeeManager, BaseHookNoState {
         return IHooks.beforeInitialize.selector;
     }
 
-    function getHooksCalls()
+    function getHooksPermissions()
         public
         pure
         virtual
         override
-        returns (Hooks.Calls memory)
+        returns (Hooks.Permissions memory)
     {
         return
-            Hooks.Calls({
+            Hooks.Permissions({
                 beforeInitialize: true,
                 afterInitialize: false,
-                beforeModifyPosition: false,
-                afterModifyPosition: false,
+                beforeAddLiquidity: false,
+                afterAddLiquidity: false,
+                beforeRemoveLiquidity: false,
+                afterRemoveLiquidity: false,
                 beforeSwap: true,
                 afterSwap: true,
                 beforeDonate: false,
-                afterDonate: false
+                afterDonate: false,
+                noOp: false,
+                accessLock: false
             });
+    }
+
+    struct BeforeSwapLocals {
+        PoolId poolId;
+        uint256 lastFeeDecreaseTime;
+        uint256 feeDecreasePerTimeUnit;
+        uint256 feeDecrease;
+        int256 feeChange;
+        uint256 token1SoFar;
+        uint256 feeIncrease;
+        uint256 currentFee;
+        uint256 newFee;
     }
 
     function beforeSwap(
         address,
-        PoolKey calldata key,
+        PoolKey calldata poolKey,
         IPoolManager.SwapParams calldata swapParams,
         bytes calldata
-    ) public virtual override poolManagerOnly(poolManager) returns (bytes4) {
+    ) public virtual override poolManagerOnly returns (bytes4) {
         if (skipBeforeAfterHooks) return IHooks.beforeSwap.selector;
 
-        PoolId poolId = key.toId();
-        PoolInfo storage poolInfo = poolInfos[poolId];
+        BeforeSwapLocals memory beforeSwapLocals;
+
+        beforeSwapLocals.poolId = poolKey.toId();
+        PoolInfo storage poolInfo = poolInfos[beforeSwapLocals.poolId];
 
         // decreasing fees as time goes by
-        uint256 lastFeeDecreaseTime = poolInfo.lastFeeDecreaseTime;
-        uint256 feeDecreasePerTimeUnit = poolInfo.feeDecreasePerTimeUnit;
-        uint256 feeDecrease = ((block.timestamp - lastFeeDecreaseTime) /
-            FEE_DECREASE_TIME_UNIT) * feeDecreasePerTimeUnit;
-        int256 feeChange = -int256(feeDecrease);
+        beforeSwapLocals.lastFeeDecreaseTime = poolInfo.lastFeeDecreaseTime;
+        beforeSwapLocals.feeDecreasePerTimeUnit = poolInfo
+            .feeDecreasePerTimeUnit;
+        beforeSwapLocals.feeDecrease =
+            ((block.timestamp - beforeSwapLocals.lastFeeDecreaseTime) /
+                FEE_DECREASE_TIME_UNIT) *
+            beforeSwapLocals.feeDecreasePerTimeUnit;
+        beforeSwapLocals.feeChange = -int256(beforeSwapLocals.feeDecrease);
 
         // increasing fees as volume increases
-        uint256 token1SoFar = poolInfo.token1SoFar;
+        beforeSwapLocals.token1SoFar = poolInfo.token1SoFar;
         if (swapParams.zeroForOne) {
-            (uint160 sqrtPriceX96, , , ) = poolManager.getSlot0(poolId);
-            token1SoFar +=
+            (uint160 sqrtPriceX96, , ) = poolManager.getSlot0(
+                beforeSwapLocals.poolId
+            );
+            beforeSwapLocals.token1SoFar +=
                 (((uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) / (2 ** 96)) *
                     uint256(swapParams.amountSpecified)) /
                 (2 ** 96);
         } else {
-            token1SoFar += uint256(swapParams.amountSpecified);
+            beforeSwapLocals.token1SoFar += uint256(swapParams.amountSpecified);
         }
-        uint256 feeIncrease = ((token1SoFar / FEE_INCREASE_TOKEN1_UNIT) *
-            poolInfo.feeIncreasePerToken1Unit);
-        feeChange += int256(feeIncrease);
+        beforeSwapLocals.feeIncrease = ((beforeSwapLocals.token1SoFar /
+            FEE_INCREASE_TOKEN1_UNIT) * poolInfo.feeIncreasePerToken1Unit);
+        beforeSwapLocals.feeChange += int256(beforeSwapLocals.feeIncrease);
 
         // changing the fees
-        if (Utils.abs(feeChange) > uint256(MINIMUM_FEE_THRESHOLD)) {
-            if (feeDecrease != 0) {
+        if (
+            Utils.abs(beforeSwapLocals.feeChange) >
+            uint256(MINIMUM_FEE_THRESHOLD)
+        ) {
+            if (beforeSwapLocals.feeDecrease != 0) {
                 poolInfo.lastFeeDecreaseTime =
-                    lastFeeDecreaseTime +
-                    ((feeDecrease / feeDecreasePerTimeUnit) *
+                    beforeSwapLocals.lastFeeDecreaseTime +
+                    ((beforeSwapLocals.feeDecrease /
+                        beforeSwapLocals.feeDecreasePerTimeUnit) *
                         FEE_DECREASE_TIME_UNIT);
             }
             poolInfo.token1SoFar =
-                token1SoFar -
-                (feeIncrease * FEE_INCREASE_TOKEN1_UNIT) /
+                beforeSwapLocals.token1SoFar -
+                (beforeSwapLocals.feeIncrease * FEE_INCREASE_TOKEN1_UNIT) /
                 poolInfo.feeIncreasePerToken1Unit;
 
-            uint256 currentFee = poolInfo.currentFee;
-            uint256 newFee = uint256(
+            beforeSwapLocals.currentFee = poolInfo.currentFee;
+            beforeSwapLocals.newFee = uint256(
                 Utils.max(
                     Utils.min(
-                        int256(currentFee) + feeChange,
+                        int256(beforeSwapLocals.currentFee) +
+                            beforeSwapLocals.feeChange,
                         int256(MAXIMUM_FEE)
                     ),
                     int256(MINIMUM_FEE)
@@ -187,11 +205,12 @@ contract VolumeFee is Ownable, IDynamicFeeManager, BaseHookNoState {
 
             // if the currentFee was at the MAXIMUM_FEE or MINIMUM_FEE, then even when abs(feeChange) > 0
             // the storage write might be avoided
-            if (newFee != currentFee) {
-                poolInfo.currentFee = uint24(newFee);
+            if (beforeSwapLocals.newFee != beforeSwapLocals.currentFee) {
+                poolInfo.currentFee = uint24(beforeSwapLocals.newFee);
+                poolManager.updateDynamicSwapFee(poolKey);
             }
         } else {
-            poolInfo.token1SoFar = token1SoFar;
+            poolInfo.token1SoFar = beforeSwapLocals.token1SoFar;
         }
         return IHooks.beforeSwap.selector;
     }
@@ -202,7 +221,7 @@ contract VolumeFee is Ownable, IDynamicFeeManager, BaseHookNoState {
         IPoolManager.SwapParams calldata swapParams,
         BalanceDelta balanceDelta,
         bytes calldata
-    ) public virtual override poolManagerOnly(poolManager) returns (bytes4) {
+    ) public virtual override poolManagerOnly returns (bytes4) {
         if (skipBeforeAfterHooks) return IHooks.afterSwap.selector;
 
         // see the comments for SWAP_MISMATCH_PCT_THRESHOLD
@@ -226,9 +245,7 @@ contract VolumeFee is Ownable, IDynamicFeeManager, BaseHookNoState {
 
     function getFee(
         address,
-        PoolKey calldata key,
-        IPoolManager.SwapParams calldata,
-        bytes calldata
+        PoolKey calldata key
     ) external view returns (uint24) {
         PoolInfo storage poolInfo = poolInfos[key.toId()];
         return poolInfo.currentFee;
